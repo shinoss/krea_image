@@ -99,6 +99,17 @@ Tensor WeightFile::get(const std::string& name) const {
 
 void WeightFile::prefetch() const { prefetch_range(0, map_size_ - data_start_); }
 
+void WeightFile::make_resident(Metal& m) const {
+  id<MTLBuffer> sink = [m.dev newBufferWithLength:4 * std::max<size_t>(1, segs_.size()) options:MTLResourceStorageModeShared];
+  id<MTLCommandBuffer> cb = [m.queue commandBuffer];
+  id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+  for (size_t i = 0; i < segs_.size(); i++)
+    [bl copyFromBuffer:segs_[i].buf sourceOffset:0 toBuffer:sink destinationOffset:4 * i size:4];
+  [bl endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+}
+
 void WeightFile::prefetch_range(size_t off, size_t len) const {
   // Touch one byte per page from 8 threads over contiguous ranges: resident pages cost ~nothing,
   // evicted ones are read back at SSD speed (much faster than GPU-side page faults).

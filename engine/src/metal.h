@@ -139,6 +139,8 @@ class Metal {
   }
   void record_host(const std::string& label, double start, double end);
   std::vector<ProfEvent> take_profile();
+  // Chrome-trace JSON of events (tid 1 = GPU segments, tid 2 = host "ane.*" calls), for dev/sim/trace.py.
+  static void write_trace(const std::vector<ProfEvent>& ev, const char* path);
   static double host_now();  // same time base as MTLCommandBuffer.GPUStartTime
 
   // encoder access for model-specific kernels

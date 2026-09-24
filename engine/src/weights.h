@@ -40,6 +40,10 @@ class WeightFile {
   const std::string& meta_json() const { return meta_; }
   // Touch every page so the first denoising step does not pay for page faults.
   void prefetch() const;
+  // Bind every segment buffer to one GPU command (a 4-byte blit each), which makes the segments resident
+  // (wired) now instead of at their first use in a denoising step, where wiring ~230 MB per DiT layer
+  // under memory pressure stalled both the GPU and the ANE (first 1024^2 step: 15-30 s instead of 7.5).
+  void make_resident(Metal& m) const;
   // Byte range [off, off + len) of the data section covering every tensor whose name starts with
   // `prefix`, and range-wise read-ahead / release (the pages stay file-backed: released ones are
   // simply re-read on next use).

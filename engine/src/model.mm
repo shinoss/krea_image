@@ -221,7 +221,8 @@ DiT::DiT(Metal& m, const std::string& path) : m_(m), w_(m, path) {
   if (const char* e = getenv("KREA_DIT_LAYERS")) layers_ = std::min(kLayers, std::max(1, atoi(e)));
   const TensorInfo& gu = w_.info("L0.gu");
   file_units_ = (int)(gu.shape[1] / 2);
-  qkvg_cols_ = (int)w_.info("L0.qkvg").shape[1];
+  split_ = w_.has("L0.kv");
+  if (!split_ && file_units_ != kFF) throw std::runtime_error("DiT: partial MLP without the k|v split layout");
   // q.k gain product per head dimension: block 0 has one dimension at 52.8 x 52.8 (every other block stays
   // below ~32); such a dimension dominates the logits (~3e4) and needs fp32 (see kernels/norm.metal).
   static const float kBigGain = getenv("KREA_BIG_GAIN") ? (float)atof(getenv("KREA_BIG_GAIN")) : 256.0f;
@@ -239,7 +240,7 @@ DiT::DiT(Metal& m, const std::string& path) : m_(m), w_(m, path) {
 }
 
 void DiT::set_ane(ANEOffload* ane) {
-  if (ane && (ane->gpu_units() != file_units_ || ane->qkvg_c0() != qkvg_cols_))
+  if (ane && (!split_ || ane->gpu_units() != file_units_))
     throw std::runtime_error("the Neural Engine programs were built for a different GPU/ANE split than the DiT weight file");
   ane_ = ane;
   if (const char* e = getenv("KREA_GPU_O_LAST")) o_last_ = std::max(0, atoi(e));
@@ -265,12 +266,14 @@ void DiT::reserve(int T, int M) {
   kbig_ = m_.alloc(R * kKvHeads * F4);
 }
 
-// QK-norm + RoPE of `rows` fused rows starting at row0 (fp32 big-dimension split for layers that have one).
-void DiT::qk_rope(int l, const Tensor& qkvg_rows, int rows, int row0) {
+// QK-norm + RoPE of `rows` fused rows starting at row0 (fp32 big-dimension split for layers that have one),
+// of the q heads, the k heads or both.
+void DiT::qk_rope(int l, const Tensor& qkvg_rows, int rows, int row0, bool q, bool k) {
   const std::string p = "L" + std::to_string(l) + ".";
   const int big = big_dim_[l];
   m_.qk_norm_rope(qkvg_rows, w_.get(p + "qn"), w_.get(p + "kn"), cos_.at((size_t)row0 * 64 * F4),
-                  sin_.at((size_t)row0 * 64 * F4), rows, kQKVG, 0, kHeads, kD, kKvHeads, kEps, kRopePairs, big,
+                  sin_.at((size_t)row0 * 64 * F4), rows, kQKVG, 0, q ? kHeads : 0, kD, k ? kKvHeads : 0, kEps,
+                  kRopePairs, big,
                   big >= 0 ? qbig_.at((size_t)row0 * kHeads * F4) : Tensor(),
                   big >= 0 ? kbig_.at((size_t)row0 * kKvHeads * F4) : Tensor());
 }
@@ -344,7 +347,11 @@ void DiT::make_cond(const float* t, const float* tvec, StepCond& out) {
 }
 
 void DiT::lin_qkvg(int l, const Tensor& h, const Tensor& dst, int rows) {
-  m_.gemm(Epi::BF16, h, w_.linear("L" + std::to_string(l) + ".qkvg"), dst, rows, qkvg_cols_, kD, kD, qkvg_cols_, kQKVG);
+  m_.gemm(Epi::BF16, h, w_.linear("L" + std::to_string(l) + ".qkvg"), dst, rows, kQKVG, kD, kD, kQKVG, kQKVG);
+}
+
+void DiT::lin_kv(int l, const Tensor& h, const Tensor& dst, int rows) {
+  m_.gemm(Epi::BF16, h, w_.linear("L" + std::to_string(l) + ".kv"), dst.at((size_t)kD * BF), rows, kKV, kD, kD, kKV, kQKVG);
 }
 
 void DiT::lin_o(int l, const Tensor& ao, const Tensor& x, int rows, const Tensor& gate) {
@@ -377,25 +384,27 @@ void DiT::layer(int l, const StepCond& c) {
   m_.mark("mlp");
 }
 
-// Hybrid layers, pipelined over chunks of C = ane_->chunk() rows of [text ; image]. Everything in a layer
-// except attention is row-wise, so a chunk can move on as soon as attention has produced it:
+// Hybrid layers, pipelined over chunks of C = ane_->chunk() rows of [text ; image]. Per layer the GPU
+// computes the k | v projection, MLP units [0, H1), attention and the last chunk's O-projection; the ANE
+// computes the q | gate projection, MLP units [H1, 16384) and the other chunks' O-projections. Everything
+// except attention is row-wise, and attention of chunk c needs every chunk's K/V (GPU) but only its own Q
+// and gate (ANE), so chunks flow through the layer boundary:
 //
-//   GPU: attention(c) -> hand off chunk c's attention output ... attention(c+1) ... add ANE O(c),
-//        RMSNorm2(c) hand-off ... [O-proj of the last chunk] ... per chunk: GPU MLP half(c), add ANE MLP(c),
-//        next layer's RMSNorm1(c) hand-off + GPU q|k|v|gate columns(c) ... add ANE columns + QK-norm/RoPE
-//   ANE: O(0) O(1) MLP(0) O(2) MLP(1) ... MLP(n-1) QKVG(0) ... QKVG(n-1)
+//   GPU: [wait QG(c), scatter, Q-norm/RoPE, attention(c)] -> hand off chunk c's attention output ...
+//        attention(c+1) ... add ANE O(c), RMSNorm2(c) hand-off ... [O-projection of the last chunk] ...
+//        per chunk: GPU MLP half(c), add ANE MLP(c), next layer's RMSNorm1(c) hand-off + k|v(c) + K-norm/RoPE
+//   ANE: O(0) O(1) MLP(0) O(2) MLP(1) ... MLP(n-1) QG(0) ... QG(n-1)
 //
-// so the ANE's O-projection and MLP work overlaps the GPU's attention, and the next layer's QKVG(c) starts
-// as soon as chunk c's MLP is merged, overlapping the GPU's MLP half of the later chunks (the Qwen engine's
-// "sched 1"). The last chunk does its O-projection on the GPU (its ANE turn would come after earlier chunks'
-// MLP and stall the GPU), before the wait for the previous chunk's ANE O-projection. With one chunk
-// nothing overlaps and the O-projection goes to the ANE. Text rows are part of chunk 0: every chunk holds
-// ANE-shaped rows, the last one zero-padded.
+// so the ANE's O-projection and MLP work overlaps the GPU's attention, and its QG(c) of the next layer
+// overlaps the GPU's MLP half of the later chunks and then the GPU's attention of the earlier chunks. The
+// last chunk does its O-projection on the GPU (its ANE turn would come after earlier chunks' MLP and stall
+// the GPU), before the wait for the previous chunk's ANE O-projection. With one chunk nothing overlaps and
+// the O-projection goes to the ANE. Text rows are part of chunk 0: every chunk holds ANE-shaped rows, the
+// last one zero-padded.
 void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
   using A = ANEOffload;
   const int R = T_ + H16_ * W16_, C = ane_->chunk(), n = (R + C - 1) / C;
   if (n > A::kMaxChunks) throw std::runtime_error("image too large for the Neural Engine buffers");
-  const int c0 = qkvg_cols_, nq = kQKVG - c0;
   const int o_last = o_last_ >= 0 ? o_last_ : (n >= 2 ? 1 : 0);
   const int n_ane_o = ane_->has(A::OPROJ) ? std::max(0, n - o_last) : 0;
   auto rows = [&](int c) { return std::min(C, R - c * C); };
@@ -404,32 +413,31 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
   auto qr = [&](int c) { return qkvg_.at((size_t)c * C * kQKVG * BF); };
   auto ar = [&](int c) { return ao_.at((size_t)c * C * kD * BF); };
   auto mr = [&](int c) { return mid_.at((size_t)c * C * file_units_ * BF); };
-  auto in = [&](A::Kind k, int c) { return ane_->input(k).at(c * ane_->chunk_bytes(kD)); };
-  auto out = [&](A::Kind k, int c) { return ane_->output(k).at(c * ane_->chunk_bytes(ane_->out_channels(k))); };
+  ane_->ensure_chunks(n);
+  auto in = [&](A::Kind k, int c) { return ane_->input(k, c); };
+  auto out = [&](A::Kind k, int c) { return ane_->output(k, c); };
   auto mv = [&](int l, int j) { return cond.mods.at(((size_t)l * 6 + j) * kD * F4); };
   std::vector<uint64_t> tq(n), to(n), tm(n);
-  std::vector<char> qdone(n, 0);
 
   // RMSNorm(x) * mul + add of chunk c -> bf16 rows in h_ (GPU half) and the ANE input chunk of kind k.
   auto handoff = [&](const Tensor& mul, const Tensor& add, A::Kind k, int c) {
     m_.rms_stats(xr(c), st_.at((size_t)c * C * F4), rows(c), kD, kEps);
     m_.rms_dual(xr(c), st_.at((size_t)c * C * F4), mul, add, hr(c), in(k, c), rows(c), C, kD, kD, C, 1.0f);
   };
-  auto qkv_start = [&](int l, int c) {
-    handoff(mv(l, 0), mv(l, 1), A::QKVG, c);
+  auto qkv_start = [&](int l, int c) {  // chunk c's residual is final for layer l's input
+    handoff(mv(l, 0), mv(l, 1), A::QG, c);
     m_.mark("ln1+handoff");
-    tq[c] = ane_->launch(A::QKVG, l, c, c + 1);
-    qdone[c] = 0;
-    lin_qkvg(l, hr(c), qr(c), rows(c));
-    m_.mark("qkvg.gpu");
+    tq[c] = ane_->launch(A::QG, l, c, c + 1);
+    lin_kv(l, hr(c), qr(c), rows(c));
+    qk_rope(l, qr(c), rows(c), c * C, false, true);
+    m_.mark("kv.gpu+rope");
   };
-  auto qkv_finish = [&](int l, int c) {  // no-op if chunk c's q|k|v|gate of this layer are already final
-    if (qdone[c]) return;
-    qdone[c] = 1;
+  auto q_finish = [&](int l, int c) {
     ane_->gpu_wait(tq[c]);
-    m_.ane_cols_scatter(out(A::QKVG, c), qr(c), rows(c), nq, C, kQKVG, c0);
-    qk_rope(l, qr(c), rows(c), c * C);
-    m_.mark("qkvg.wait+scatter+rope");
+    m_.ane_cols_scatter(out(A::QG, c), qr(c), rows(c), kD, C, kQKVG, 0);
+    m_.ane_cols_scatter(out(A::QG, c).at(ane_->chunk_bytes(kD)), qr(c), rows(c), kD, C, kQKVG, kGateCol);
+    qk_rope(l, qr(c), rows(c), c * C, true, false);
+    m_.mark("qg.wait+scatter+rope");
   };
   auto mlp_start = [&](int l, int c) {  // chunk c's O-projection is in x
     handoff(mv(l, 3), mv(l, 4), A::MLP, c);
@@ -440,7 +448,7 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
   if (serial_) {  // unpipelined reference schedule: whole-layer hand-offs, the GPU waits at each merge
     for (int l = l0; l < l1; l++) {
       for (int c = 0; c < n; c++) qkv_start(l, c);
-      for (int c = 0; c < n; c++) qkv_finish(l, c);
+      for (int c = 0; c < n; c++) q_finish(l, c);
       attend(l, qkvg_, R, 0, ao_, R);
       lin_o(l, ao_, x_, R, mv(l, 2));
       for (int c = 0; c < n; c++) mlp_start(l, c);
@@ -453,11 +461,7 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
     return;
   }
 
-  for (int c = 0; c < n; c++) {
-    qkv_start(l0, c);
-    if (c) qkv_finish(l0, c - 1);
-  }
-  qkv_finish(l0, n - 1);
+  for (int c = 0; c < n; c++) qkv_start(l0, c);
   for (int l = l0; l < l1; l++) {
     const Tensor g1 = mv(l, 2), g2 = mv(l, 5);
     auto o_finish = [&](int c) {
@@ -466,8 +470,8 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
       m_.mark("o.wait+resid");
       mlp_start(l, c);
     };
-    for (int c = 0; c < n; c++) qkv_finish(l, c);  // (all done in the previous layer)
     for (int c = 0; c < n; c++) {
+      q_finish(l, c);
       attend(l, qr(c), rows(c), c * C, ar(c), R);
       m_.mark("attention");
       if (c < n_ane_o) {
@@ -492,8 +496,8 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
       m_.mark("o_proj");
       mlp_start(l, c);
     }
-    // Per chunk: GPU MLP half, ANE merge, next layer's RMSNorm1 hand-off + GPU q|k|v|gate columns, so the
-    // ANE's QKVG(c) is queued right behind its MLP work. The waits for the ANE's columns come last.
+    // Per chunk: GPU MLP half, ANE merge, next layer's RMSNorm1 hand-off (the ANE's QG(c) is queued right
+    // behind its MLP work) + GPU k|v columns.
     for (int c = 0; c < n; c++) {
       lin_mlp(l, hr(c), mr(c), xr(c), rows(c), g2);
       m_.mark("mlp.gpu");
@@ -502,8 +506,6 @@ void DiT::forward_hybrid(int l0, int l1, const StepCond& cond) {
       m_.mark("mlp.wait+resid");
       if (l + 1 < l1) qkv_start(l + 1, c);
     }
-    if (l + 1 < l1)
-      for (int c = 0; c < n; c++) qkv_finish(l + 1, c);
   }
 }
 

@@ -9,7 +9,7 @@ OBJS := $(patsubst src/%.mm,$(BUILD)/%.o,$(SRCS))
 
 CXX := clang++
 CXXFLAGS := -O2 -std=c++17 -fobjc-arc -Wall -Wno-unused-function -Wno-missing-braces -DACCELERATE_NEW_LAPACK
-FRAMEWORKS := -framework Metal -framework Foundation -framework CoreML -framework Accelerate -framework IOSurface
+FRAMEWORKS := -framework Metal -framework Foundation -framework CoreML -framework Accelerate -framework IOSurface -framework CoreVideo
 METALFLAGS := -std=metal3.1 -O3 -ffast-math
 
 all: $(BUILD)/krea.metallib $(BUILD)/libkrea.dylib

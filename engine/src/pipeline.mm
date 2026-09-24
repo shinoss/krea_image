@@ -88,6 +88,7 @@ class Engine {
     kv_build_ = fnv_files({build_dir(root) + "/krea.metallib", self_path()}, true) ^
                 fnv_files({e + "te.qw", e + "txt.qw"}, false);
     dit_->weights().prefetch();
+    dit_->weights().make_resident(m_);
   }
 
   bool ane_available(bool fast = false) const { return !split_path(fast).empty(); }
@@ -97,6 +98,10 @@ class Engine {
   int generate(const std::vector<int>& ids, const std::vector<int>& neg, const krea_params& p, uint8_t* out,
                krea_stats* st, krea_progress_fn cb, void* user) {
     const double t0 = now_ms();
+    static const bool verbose = getenv("KREA_VERBOSE") != nullptr;
+    auto vlog = [&](const char* what) {
+      if (verbose) fprintf(stderr, "[gen] %8.1f ms  %s\n", now_ms() - t0, what);
+    };
     krea_stats s{};
     auto report = [&](const char* stage, int i, int n, const krea_preview* pv = nullptr) {
       return cb ? cb(user, stage, i, n, now_ms() - t0, pv) : 0;
@@ -109,6 +114,7 @@ class Engine {
       if (report("loading", 0, 1)) return 1;
       load_dit(fast, want_ane);
       dit_->weights().prefetch();
+      dit_->weights().make_resident(m_);
     }
     const int H16 = p.height / 16, W16 = p.width / 16, M = H16 * W16;
     if (H16 < 2 || W16 < 2) throw std::runtime_error("image too small");
@@ -123,6 +129,7 @@ class Engine {
     Tensor txt = text_features(ids, &T, &hit), ntxt;
     if (cfg) ntxt = text_features(neg, &Tn, nullptr);
     s.encode_ms = now_ms() - t1;
+    vlog("text features");
     s.text_tokens = T;
     s.cached_prompt = hit;
     if (report("encode", 1, 1)) return 1;
@@ -139,6 +146,7 @@ class Engine {
       }
     }
 
+    vlog("conditioning");
     // ---- 3. denoising loop ----
     Tensor z = m_.alloc((size_t)M * kLatC * 4), vel = m_.alloc((size_t)M * kLatC * 4), vel2;
     if (cfg) vel2 = m_.alloc((size_t)M * kLatC * 4);
@@ -191,6 +199,11 @@ class Engine {
         cancel = report("denoise", i, n_steps);
       }
       m_.wait();
+      if (verbose) {
+        char b[48];
+        snprintf(b, sizeof(b), "step %d done", i + 1);
+        vlog(b);
+      }
       if (fastpv) {
         memcpy(zs.data(), z.ptr<float>(), zs.size() * 4);
         memcpy(vs.data(), vel.ptr<float>(), vs.size() * 4);
@@ -210,6 +223,7 @@ class Engine {
     if (cancel) return 1;
     s.denoise_ms = now_ms() - t1;
     s.step_ms = s.denoise_ms / n_steps;
+    if (const char* tr = getenv("KREA_TRACE")) Metal::write_trace(m_.take_profile(), tr);  // with KREA_PROFILE=1
     if (p.latent_out) memcpy(p.latent_out, z.ptr<float>(), (size_t)M * kLatC * 4);
 
     // ---- 4. VAE decode ----
@@ -346,15 +360,15 @@ class Engine {
       if (exists(e + n)) return e + n;
     return "";
   }
-  // Hybrid mode: weights/ane[_fast]/meta.json records the GPU/ANE split; dit_h<H1>_c<c0>[_fast].qw holds the
-  // GPU's slices (MLP units [0, H1), q|k|v|gate columns [0, c0)); the ANE programs hold the rest.
+  // Hybrid mode: weights/ane[_fast]/meta.json records the GPU/ANE split; dit_h<H1>_kv[_fast].qw holds the
+  // GPU's slices (k|v projection, MLP units [0, H1), O-projection); the ANE programs hold the rest.
   std::string ane_dir(bool fast) const { return root_ + (fast ? "/weights/ane_fast" : "/weights/ane"); }
   std::string split_path(bool fast) const {
     NSData* d = [NSData dataWithContentsOfFile:@((ane_dir(fast) + "/meta.json").c_str())];
     NSDictionary* j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
     if (!j) return "";
-    const std::string path = root_ + "/weights/engine/dit_h" + std::to_string([j[@"gpu_units"] intValue]) + "_c" +
-                             std::to_string([j[@"qkvg_c0"] intValue]) + (fast ? "_fast" : "") + ".qw";
+    const std::string path = root_ + "/weights/engine/dit_h" + std::to_string([j[@"gpu_units"] intValue]) + "_kv" +
+                             (fast ? "_fast" : "") + ".qw";
     return exists(path) ? path : "";
   }
   void load_dit(bool fast, bool hybrid) {

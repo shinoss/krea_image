@@ -171,11 +171,11 @@ def _diffusers_names():
 DIFFUSERS = _diffusers_names()
 
 
-def dit_specs(quant, H1=FF, c0=2 * D + 2 * 1536):
+def dit_specs(quant, H1=FF, split=False):
     specs = []
     for i in range(LAYERS):
         p = f"L{i}."
-        specs += linear_specs(p + "qkvg", D, c0, quant)
+        specs += linear_specs(p + "kv", D, 2 * 1536, quant) if split else linear_specs(p + "qkvg", D, 2 * D + 2 * 1536, quant)
         specs += linear_specs(p + "o", D, D, quant)
         specs += linear_specs(p + "gu", D, 2 * H1, quant)
         specs += linear_specs(p + "down", H1, D, quant)
@@ -186,21 +186,25 @@ def dit_specs(quant, H1=FF, c0=2 * D + 2 * 1536):
     return specs
 
 
-def convert_dit(quant=False, fast=False, H1=FF, c0=2 * D + 2 * 1536):
-    """H1 < 16384 / c0 < 15360: the GPU's slices of a GPU/ANE split (MLP units [0, H1), fused q|k|v|gate
-    columns [0, c0)); the ANE programs with the rest come from tools/build_ane.py with the same numbers."""
+def convert_dit(quant=False, fast=False, H1=FF, split=False):
+    """split: the GPU's slices of the GPU/ANE split, dit_h<H1>_kv.qw: the k|v projection (L*.kv, 3072 columns),
+    MLP units [0, H1) and the full O-projection; tools/build_ane.py builds the rest (q|gate, MLP units
+    [H1, 16384), O) with the same H1."""
     s = DitSource(lora=fast)
-    split = H1 < FF or c0 < 2 * D + 2 * 1536
-    name = "dit" + (f"_h{H1}_c{c0}" if split else "") + ("_fast" if fast else "") + ("_q8" if quant else "") + ".qw"
-    w = StreamWriter(os.path.join(DST, name), dit_specs(quant, H1, c0),
-                     {"model": "krea2-turbo-dit", "layers": LAYERS, "q8": quant, "gpu_units": H1, "qkvg_c0": c0,
-                      "lora": os.path.basename(LORA_FILE) if fast else None})
+    name = "dit" + (f"_h{H1}_kv" if split else "") + ("_fast" if fast else "") + ("_q8" if quant else "") + ".qw"
+    w = StreamWriter(os.path.join(DST, name), dit_specs(quant, H1, split),
+                     {"model": "krea2-turbo-dit", "layers": LAYERS, "q8": quant, "gpu_units": H1,
+                      "attn_split": "kv" if split else None, "lora": os.path.basename(LORA_FILE) if fast else None})
     t0 = time.time()
     cast = (lambda t: t) if quant else (lambda t: t.to(torch.bfloat16))
     for i in range(LAYERS):
         p, b = f"L{i}.", f"blocks.{i}."
-        qkvg = torch.cat([s.get(b + f"attn.{n}.weight").float() for n in ("wq", "wk", "wv", "gate")])  # [15360, 6144]
-        put_linear(w, p + "qkvg", cast(qkvg[:c0].t()), quant)
+        if split:
+            kv = torch.cat([s.get(b + f"attn.{n}.weight").float() for n in ("wk", "wv")])  # [3072, 6144]
+            put_linear(w, p + "kv", cast(kv.t()), quant)
+        else:
+            qkvg = torch.cat([s.get(b + f"attn.{n}.weight").float() for n in ("wq", "wk", "wv", "gate")])  # [15360, 6144]
+            put_linear(w, p + "qkvg", cast(qkvg.t()), quant)
         put_linear(w, p + "o", cast(s.get(b + "attn.wo.weight").float().t()), quant)
         gu = interleave_gate_up(s.get(b + "mlp.gate.weight").float()[:H1], s.get(b + "mlp.up.weight").float()[:H1])
         put_linear(w, p + "gu", cast(gu.t()), quant)
@@ -446,14 +450,13 @@ if __name__ == "__main__":
     ap.add_argument("parts", nargs="+", help="te te_q8 txt dit dit_q8 dit_fast dit_fast_q8 dit_split dit_split_fast "
                                              "cond vae tokenizer verify")
     ap.add_argument("--gpu-units", type=int, default=3072, help="dit_split: MLP units kept on the GPU")
-    ap.add_argument("--qkvg-c0", type=int, default=3072, help="dit_split: fused q|k|v|gate columns kept on the GPU")
     a = ap.parse_args()
     os.makedirs(DST, exist_ok=True)
     jobs = {"te": convert_te, "te_q8": lambda: convert_te(True), "txt": convert_txt, "dit": convert_dit,
             "dit_q8": lambda: convert_dit(True), "dit_fast": lambda: convert_dit(False, True),
             "dit_fast_q8": lambda: convert_dit(True, True),
-            "dit_split": lambda: convert_dit(False, False, a.gpu_units, a.qkvg_c0),
-            "dit_split_fast": lambda: convert_dit(False, True, a.gpu_units, a.qkvg_c0),
+            "dit_split": lambda: convert_dit(False, False, a.gpu_units, True),
+            "dit_split_fast": lambda: convert_dit(False, True, a.gpu_units, True),
             "cond": convert_cond, "vae": convert_vae,
             "tokenizer": copy_tokenizer, "verify": verify}
     for part in a.parts:

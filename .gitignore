@@ -2,6 +2,7 @@
 /weights/
 /cache/
 /ref/
+/ref1024/
 *.safetensors
 *.kw
 *.qw

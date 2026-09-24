@@ -25,7 +25,7 @@ Metal::Metal(const std::string& metallib_path) {
   NSArray<id<MTLDevice>>* devs = MTLCopyAllDevices();
   dev = devs.count ? devs[0] : MTLCreateSystemDefaultDevice();
   if (!dev) throw std::runtime_error("no Metal device");
-  queue = [dev newCommandQueue];
+  queue = [dev newCommandQueueWithMaxCommandBufferCount:1024];  // a hybrid step splits into ~300 buffers (one per ANE hand-off); the default 64 would block encoding
   profile_ = getenv("KREA_PROFILE") != nullptr;
   NSError* err = nil;
   lib_ = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(metallib_path.c_str())] error:&err];
@@ -279,6 +279,18 @@ void Metal::ane_cols_scatter(const Tensor& in, const Tensor& out, int rows, int 
   struct { int rows, ld_in, ld_out, col0; } p{rows, ld_in, ld_out, col0};
   dispatch("ane_cols_scatter", MTLSizeMake(n / 64, (rows + 31) / 32, 1), MTLSizeMake(256, 1, 1), {in, out}, &p,
            sizeof(p), 2);
+}
+
+void Metal::write_trace(const std::vector<ProfEvent>& ev, const char* path) {
+  FILE* f = fopen(path, "w");
+  if (!f) return;
+  fprintf(f, "[\n");
+  for (size_t i = 0; i < ev.size(); i++)
+    fprintf(f, "{\"name\":\"%s\",\"ph\":\"X\",\"ts\":%.1f,\"dur\":%.1f,\"pid\":1,\"tid\":%d}%s\n", ev[i].label.c_str(),
+            ev[i].start * 1e6, (ev[i].end - ev[i].start) * 1e6, ev[i].label.rfind("ane.", 0) == 0 ? 2 : 1,
+            i + 1 < ev.size() ? "," : "");
+  fprintf(f, "]\n");
+  fclose(f);
 }
 
 }  // namespace krea

@@ -13,6 +13,8 @@ namespace krea {
 constexpr int kD = 6144;            // DiT width
 constexpr int kHeads = 48, kKvHeads = 12, kHd = 128;
 constexpr int kQKVG = kD + 2 * kKvHeads * kHd + kD;  // fused q | k | v | gate = 15360
+constexpr int kKV = 2 * kKvHeads * kHd;              // k | v columns (3072), at column kD of the fused rows
+constexpr int kGateCol = kD + kKV;                   // gate columns start (9216)
 constexpr int kFF = 16384;          // DiT SwiGLU units
 constexpr int kLayers = 28;
 constexpr int kLatC = 64;           // packed latent channels (16 x 2 x 2)
@@ -125,17 +127,17 @@ class DiT {
   WeightFile& weights() { return w_; }
   int layers() const { return layers_; }
   // Attach the Neural Engine half of the linear layers. Required when the weight file holds only the
-  // GPU's slices (dit_split: MLP units [0, H1), q|k|v|gate columns [0, c0)); see ane.h.
+  // GPU's slices (dit_split: the k | v projection, MLP units [0, H1) and the O-projection); see ane.h.
   void set_ane(class ANEOffload* ane);
-  bool needs_ane() const { return file_units_ < kFF || qkvg_cols_ < kQKVG; }
+  bool needs_ane() const { return split_; }
   int gpu_units() const { return file_units_; }
-  int gpu_qkvg_cols() const { return qkvg_cols_; }
 
  private:
   void layer(int l, const StepCond& c);
-  // GPU linear layers (the GPU's share when the ANE is attached): q|k|v|gate columns [0, c0) into the
-  // fused rows `dst` (row stride 15360), the gated O-projection, and the MLP units [0, H1).
+  // GPU linear layers: the fused q|k|v|gate projection (GPU-only file) or, with the ANE attached, only its
+  // k | v columns, into the fused rows `dst` (row stride 15360); the gated O-projection; MLP units [0, H1).
   void lin_qkvg(int l, const Tensor& h, const Tensor& dst, int rows);
+  void lin_kv(int l, const Tensor& h, const Tensor& dst, int rows);
   void lin_o(int l, const Tensor& ao, const Tensor& x, int rows, const Tensor& gate);
   void lin_mlp(int l, const Tensor& h, const Tensor& mid, const Tensor& x, int rows, const Tensor& gate);
   // Hybrid layers [l0, l1), pipelined over chunks of the ANE's row count (see model.mm).
@@ -143,7 +145,8 @@ class DiT {
   Metal& m_;
   WeightFile w_;
   class ANEOffload* ane_ = nullptr;
-  int file_units_ = kFF, qkvg_cols_ = kQKVG;
+  int file_units_ = kFF;
+  bool split_ = false;    // the file holds only the GPU's slices (L*.kv instead of L*.qkvg)
   int o_last_ = -1;       // trailing chunks whose O-projection stays on the GPU (KREA_GPU_O_LAST; -1 = auto)
   bool serial_ = false;   // KREA_SERIAL: unpipelined hybrid schedule (for comparison)
   int layers_ = kLayers;  // debug: KREA_DIT_LAYERS runs only the first N blocks
@@ -154,7 +157,7 @@ class DiT {
   // the attention's rank-1 score term; -1 = none. Detected from the norm weights at load.
   std::vector<int> big_dim_;
   Tensor qbig_, kbig_;  // f32 [R, 48] / [R, 12]
-  void qk_rope(int l, const Tensor& qkvg_rows, int rows, int row0);
+  void qk_rope(int l, const Tensor& qkvg_rows, int rows, int row0, bool q = true, bool k = true);
   void attend(int l, const Tensor& q_rows, int rows, int row0, const Tensor& o_rows, int R);
 };
 

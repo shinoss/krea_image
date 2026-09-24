@@ -85,6 +85,14 @@ class Engine:
         self.ane_available = bool(L.krea_ane_available(self.h))
         self.fast_available = bool(L.krea_fast_available(self.h))
         self.gpu_only_available = bool(L.krea_gpu_only_available(self.h))
+        L.krea_destroy.argtypes = [ctypes.c_void_p]
+
+    def close(self):
+        """Free the engine (GPU buffers, Neural Engine programs) now instead of at process exit."""
+        with self.lock:
+            if self.h:
+                self.lib.krea_destroy(self.h)
+                self.h = None
 
     def prepare(self, prompt):
         """Encode a prompt ahead of generate() (text encoder + text fusion, kept in the prompt cache).

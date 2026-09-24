@@ -1,8 +1,7 @@
 # Model weights, converted weights, Neural Engine programs, caches
 /weights/
 /cache/
-/ref/
-/ref1024/
+/ref*/
 *.safetensors
 *.kw
 *.qw

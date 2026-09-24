@@ -10,7 +10,7 @@ queued, the worker encodes it ahead (text encoder + text fusion, cached in the e
 starts denoising right away. A newer prepare replaces a pending one. /api/status reports "busy" while
 either runs (dev/bench/gpu_lock.py waits on it), "generating" for a generation only.
 
-Every request passes the content-filter hook (ui/content_filter.py; Krea 2 Community License §4.2):
+Every request passes the content-filter hook (ui/content_filter.py; required by the Krea 2 Turbo model card):
 the prompt before any work, the image before it is saved or shown.
 
 Everything the process prints (including the native engine's stderr) is also written to
@@ -80,7 +80,11 @@ def load_engine():
 
         S.engine = Engine(ROOT)
         S.ane_available = S.engine.ane_available
-        S.fast_available = S.engine.fast_available
+        # Switching presets reloads a different ~16 GB weight set (GPU file + Neural Engine programs) in this
+        # process. A test that switched back and forth froze the machine on 2026-09-24, most likely because
+        # the old set was not yet freed when the new one was wired. Until the switch is fixed and verified,
+        # the Fast preset stays hidden unless KREA_ALLOW_PRESET_SWITCH=1.
+        S.fast_available = S.engine.fast_available and os.environ.get("KREA_ALLOW_PRESET_SWITCH") == "1"
         S.gpu_only_available = S.engine.gpu_only_available
         S.engine_state = "ready"
     except Exception as e:  # surfaced in the UI

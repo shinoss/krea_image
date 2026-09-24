@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build KreaImage.app (SwiftUI, compiled with swiftc) into the project root and sign it ad hoc.
 #   app/build.sh                 -> ./KreaImage.app
-#   app/build.sh --install       -> also copy it to ~/Applications
+#   app/build.sh --install       -> also copy it to /Applications
 set -euo pipefail
 cd "$(dirname "$0")"
 PROJECT="$(cd .. && pwd)"
@@ -55,9 +55,8 @@ codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --strict "$APP" && echo "signature ok"
 
 if [ "${1:-}" = "--install" ]; then
-  mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/KreaImage.app"
-  cp -R "$APP" "$HOME/Applications/"
-  echo "installed to ~/Applications/KreaImage.app"
+  rm -rf "/Applications/KreaImage.app"
+  cp -R "$APP" "/Applications/"
+  echo "installed to /Applications/KreaImage.app"
 fi
 echo "built $APP"

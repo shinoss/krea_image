@@ -26,6 +26,8 @@ the GPU merge multiplies back), and the O-projection input by 1/O_SCALE (the GPU
 merge multiplies back). meta.json records both.
 
   TMPDIR=<scratch> python tools/build_ane.py --gpu-units 3072 [--chunk 1152] [--fast] [--layers N]
+
+Resumable: programs already in the output directory are kept (the meta.json must match).
 """
 import argparse
 import gc
@@ -190,6 +192,11 @@ def save(model, out_dir, name):
     compiled = ct.models.utils.compile_model(pkg)
     shutil.move(compiled, os.path.join(out_dir, name + ".mlmodelc"))
     shutil.rmtree(pkg)
+    # ct.convert keeps its own copy of every program in a temporary .mlpackage under TMPDIR and deletes it
+    # only at interpreter exit (atexit): 28 layers would pile up ~9 GB there, and a killed build leaves it.
+    tmp = getattr(model, "package_path", None)
+    if getattr(model, "is_temp_package", False) and tmp and os.path.isdir(tmp):
+        shutil.rmtree(tmp)
 
 
 def main():

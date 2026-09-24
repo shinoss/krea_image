@@ -1,0 +1,17 @@
+# Prompt blocklist for the content-filter hook (ui/content_filter.py). Entries are hashes, not phrases:
+# "sha256 <words> <digest>" blocks any run of <words> consecutive prompt words (normalized: NFKC, lower case,
+# punctuation -> spaces) whose salted SHA-256 is <digest>. Add a phrase with
+#   python ui/content_filter.py add
+# (hidden input; only the hash is written). Plain-text lines also work, for local additions. This is a minimal
+# default, not a complete safety system: extend it for your deployment and/or plug in a classifier with
+# KREA_FILTER=/path/to/module.py. The Krea 2 Turbo model card (Safety Measures) requires deployers to use
+# content filtering or an equivalent review process.
+sha256 2 08f401afcb3c27b8709507b7ec4891d031d4c431bc126d92660f1b8bc6139a54
+sha256 2 189e64e0b4f6fc3d89dfd1cddcf9b2844ea0ef01302019a72625cd97538b1910
+sha256 1 5b10e60d6f9cad08f297b89a0709b954f8dbad7503d543ae1cf9742444342c77
+sha256 2 ece14eed6df2911306603c2e22781f559ac9638445ed58a79ce4816f42431461
+sha256 2 26675a7234513dc4c45ee8e90a9360ac7630aab7c8784118ae6383fe6f72820e
+sha256 1 2851c132eb71ac60572d707e1227952c16b1e80a42e70fdb0ef8899ba27e09d6
+sha256 1 a808199a2ada8b906381824c41973e071f4060f26c44dccf9634b8935f14385a
+sha256 1 e2e6c70ac6ab7c7a0bef721b35b9846ecb1c2e586ddfd2fcafbbee4d417c4e82
+sha256 1 1e07dbea873fc44b599270b470f6801d22397c69b395e9f651c88ada5c24875f

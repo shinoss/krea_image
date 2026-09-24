@@ -1,0 +1,34 @@
+# Model weights, converted weights, Neural Engine programs, caches
+/weights/
+/cache/
+/ref/
+*.safetensors
+*.kw
+*.qw
+*.mlmodelc/
+*.mlpackage/
+
+# Generated images (private) and runtime logs
+/outputs/
+/logs/
+*.log
+
+# Python environment
+/.venv/
+__pycache__/
+*.pyc
+
+# Build artifacts
+/engine/build*/
+/KreaImage.app/
+/app/build/
+/app/AppIcon.iconset/
+*.air
+*.metallib
+*.dylib
+
+# Development tools, benchmarks and experiments (kept locally, not part of the app)
+/dev/
+
+# macOS
+.DS_Store

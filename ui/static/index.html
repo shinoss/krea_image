@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Krea 2 Studio</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6861; --line: #e3e0d9;
+  --accent: #d9480f; --accent-ink: #ffffff; --accent-soft: #fdebe3; --ok: #1f8a4c; --warn: #b7791f; --err: #c53030;
+  --check-a: #eceae5; --check-b: #f8f7f4; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131312; --panel: #1c1c1a; --ink: #eceae4; --muted: #9a978f; --line: #2e2d2a;
+    --accent: #ff8a4c; --accent-ink: #1a0e08; --accent-soft: #3a2218; --check-a: #232321; --check-b: #2a2a27;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+header .sub { color: var(--muted); font-size: 12.5px; }
+.pill { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px;
+  border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+main { display: grid; grid-template-columns: 360px 1fr; gap: 20px; padding: 20px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
+.controls { display: flex; flex-direction: column; gap: 16px; align-self: start; }
+label.h { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 600;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+label.h span.v { text-transform: none; letter-spacing: 0; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+textarea, input[type=number], input[type=text] { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; font: inherit; outline: none; }
+textarea { resize: vertical; min-height: 104px; }
+textarea:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.seg { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.seg.three { grid-template-columns: repeat(4, 1fr); }
+.seg.speed { grid-template-columns: repeat(2, 1fr); }
+.seg.sizes { grid-template-columns: repeat(5, 1fr); }
+#speedRow.off { opacity: .45; pointer-events: none; }
+.seg button { padding: 7px 0; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
+  font: inherit; font-size: 12.5px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.seg button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; }
+.iconbtn { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
+  color: var(--ink); cursor: pointer; font-size: 16px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13.5px; }
+.toggle small { display: block; color: var(--muted); font-size: 12px; }
+.switch { position: relative; width: 38px; height: 22px; flex: 0 0 auto; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 999px; transition: .15s; cursor: pointer; }
+.switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%;
+  background: #fff; transition: .15s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(16px); }
+.switch input:disabled + span { opacity: .4; cursor: not-allowed; }
+.go { display: flex; gap: 8px; }
+.primary { flex: 1; padding: 12px; border: 0; border-radius: 11px; background: var(--accent); color: var(--accent-ink);
+  font: inherit; font-weight: 650; font-size: 15px; cursor: pointer; }
+.primary:disabled { opacity: .5; cursor: not-allowed; }
+.secondary { padding: 12px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--bg); color: var(--ink);
+  font: inherit; cursor: pointer; }
+.hint { color: var(--muted); font-size: 12px; }
+.prep { opacity: 0; visibility: hidden; transition: opacity .3s, visibility .3s; }
+.prep.show { opacity: 1; visibility: visible; }
+details summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+details[open] summary { margin-bottom: 8px; }
+.stage { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.canvas { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow);
+  background-color: var(--check-b); background-image: linear-gradient(45deg, var(--check-a) 25%, transparent 25%),
+  linear-gradient(-45deg, var(--check-a) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--check-a) 75%),
+  linear-gradient(-45deg, transparent 75%, var(--check-a) 75%); background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0; display: grid; place-items: center; min-height: 420px; aspect-ratio: 1 / 1;
+  max-height: calc(100vh - 220px); margin: 0 auto; width: 100%; }
+.canvas img.layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block;
+  opacity: 0; transition: opacity .7s ease; pointer-events: none; }
+.canvas img.layer.show { opacity: 1; }
+#prev { z-index: 1; image-rendering: auto; }
+#img { z-index: 2; }
+.pvbar { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 3; display: none; justify-content: space-between;
+  align-items: center; gap: 8px; pointer-events: none; }
+.pvbar.show { display: flex; }
+.pvstep, .pvmode { background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(8px);
+  border: 1px solid var(--line); border-radius: 999px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pvstep { padding: 5px 11px; }
+.pvmode { display: flex; padding: 3px; gap: 2px; pointer-events: auto; }
+.pvmode button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 10px;
+  border-radius: 999px; cursor: pointer; }
+.pvmode button.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+select { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 10px; font: inherit; }
+.empty { position: relative; z-index: 0; color: var(--muted); text-align: center; padding: 24px; max-width: 360px; }
+.empty b { color: var(--ink); display: block; font-size: 15px; margin-bottom: 4px; }
+.overlay { position: absolute; z-index: 4; left: 12px; right: 12px; bottom: 12px; background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: none; }
+.overlay.show { display: block; }
+.bar { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; margin-top: 8px; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+.ov-top { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.ov-top b { font-weight: 600; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line);
+  font-variant-numeric: tabular-nums; }
+.chip b { font-weight: 650; }
+.stats a { margin-left: auto; color: var(--accent); text-decoration: none; font-weight: 600; font-size: 13px; }
+.stats .linkbtn { margin-left: 4px; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.gitem { position: relative; aspect-ratio: 1; }
+.gthumb { width: 100%; height: 100%; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  cursor: pointer; background: var(--check-b); display: block; }
+.gitem.current .gthumb { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.gdel { position: absolute; top: 5px; right: 5px; height: 22px; min-width: 22px; padding: 0 6px; border-radius: 999px; border: 0;
+  background: rgba(20, 20, 20, .62); color: #fff; font: inherit; font-size: 11px; line-height: 22px; cursor: pointer;
+  opacity: 0; transition: opacity .15s, background .15s; }
+.gitem:hover .gdel, .gdel:focus-visible, .gdel.armed { opacity: 1; }
+.gdel.armed { background: var(--err); font-weight: 600; }
+.linkbtn { border: 0; background: none; padding: 0; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.linkbtn.danger { color: var(--err); }
+.linkbtn.danger.armed { background: var(--err); color: #fff; padding: 3px 10px; border-radius: 999px; }
+.gthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.err { color: var(--err); font-size: 13px; }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Krea 2 Turbo Studio</h1>
+    <div class="sub">Custom Metal + Neural Engine engine · shape-specialized kernels on Apple silicon</div>
+  </div>
+  <div class="pill" id="status"><span class="dot" id="dot"></span><span id="statusText">Loading engine…</span></div>
+</header>
+
+<main>
+  <section class="panel controls">
+    <div>
+      <label class="h" for="prompt">Prompt</label>
+      <textarea id="prompt" placeholder="A small red fox curled up asleep in fresh snow at dawn, soft pink light, shallow depth of field, photograph"></textarea>
+      <div class="hint" style="margin-top:6px"><kbd>⌘</kbd> <kbd>↵</kbd> to generate<span class="prep" id="prepHint"
+        title="The prompt is already encoded: Generate starts denoising right away."> · prompt ready</span></div>
+    </div>
+
+    <div>
+      <label class="h">Aspect ratio <span class="v" id="dims">1024 × 1024</span></label>
+      <div class="seg" id="ratios"></div>
+    </div>
+
+    <div>
+      <label class="h">Resolution</label>
+      <div class="seg sizes" id="sizes"></div>
+    </div>
+
+    <div id="speedRow">
+      <label class="h">Preset</label>
+      <div class="seg speed" id="speed"></div>
+      <div class="hint" id="speedHint"></div>
+    </div>
+
+    <div class="hint" id="eta"></div>
+
+    <div>
+      <label class="h" for="seed">Seed</label>
+      <div class="row">
+        <input type="number" id="seed" placeholder="random" min="0">
+        <button class="iconbtn" id="dice" title="Random seed">🎲</button>
+      </div>
+    </div>
+
+    <label class="toggle" id="aneRow">
+      <span>Neural Engine assist<small id="aneHint">Offload part of every DiT layer to the ANE</small></span>
+      <span class="switch"><input type="checkbox" id="ane"><span></span></span>
+    </label>
+
+    <div>
+      <label class="h" for="pvSel">Live preview</label>
+      <select id="pvSel">
+        <option value="fast">Every step (fast latent preview)</option>
+        <option value="hq4">Every step + VAE decode every 4 steps</option>
+        <option value="hq2">Every step + VAE decode every 2 steps</option>
+        <option value="off">Off</option>
+      </select>
+      <div class="hint">The fast preview is a CPU projection of the latent (1/8 resolution) and costs no GPU time; VAE decodes add one decode per N steps.</div>
+    </div>
+
+    <div class="go">
+      <button class="primary" id="go" disabled>Generate</button>
+      <button class="secondary" id="cancel" style="display:none">Cancel</button>
+    </div>
+    <div class="err" id="err"></div>
+    <div class="hint" id="filterHint"></div>
+  </section>
+
+  <section class="stage">
+    <div class="canvas" id="canvas">
+      <div class="empty" id="empty"><b>Nothing here yet</b>Write a prompt and press Generate. The first run after startup pages the weights into memory.</div>
+      <img id="prev" class="layer" alt="">
+      <img id="img" class="layer" alt="">
+      <div class="pvbar" id="pvbar">
+        <span class="pvstep" id="pvStep"></span>
+        <div class="pvmode" id="pvMode"><button data-k="x0">Predicted image</button><button data-k="noisy">Noisy latent</button></div>
+      </div>
+      <div class="overlay" id="overlay">
+        <div class="ov-top"><b id="ovStage">Queued</b><span id="ovTime"></span></div>
+        <div class="bar"><i id="ovBar"></i></div>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="panel" id="histPanel" style="display:none">
+      <label class="h">Recent</label>
+      <div class="gallery" id="gallery"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const RATIOS = [["1:1", 1, 1], ["4:3", 4, 3], ["3:4", 3, 4], ["3:2", 3, 2], ["2:3", 2, 3], ["16:9", 16, 9], ["9:16", 9, 16]];
+const SIZES = [768, 1024, 1280, 1536, 2048];
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("krea." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("krea." + k, JSON.stringify(v)); } catch {} },
+};
+let ratio = store.get("ratio", "1:1"), size = store.get("size", 1024), job = null, ready = false, aneInit = false;
+let pvKind = store.get("pvKind", "x0"), pvShown = "", lastJob = null, fastAvail = false;
+
+// Presets: Quality = the official 8-step Turbo schedule; Fast = the 4-step distillation LoRA
+// (lvladikov/Krea2-Turbo-Distill-4step-LoRA, merged into the weights), on Turbo's own sigmas.
+const PRESETS = {
+  quality: { label: "Quality · 8 steps", steps: 8,
+             hint: "The official Krea 2 Turbo settings: 8 Euler steps, no guidance." },
+  fast: { label: "Fast · 4 steps", steps: 4,
+          hint: "4-step distillation LoRA (merged): about half the time. Its author's test preferred the 8-step result on 6 of 45 images." },
+};
+let preset = PRESETS[store.get("preset", "quality")] ? store.get("preset", "quality") : "quality";
+
+// Same rule as the official pipeline: keep the area, round to 16 px (8x VAE, 2x2 patches).
+function dims() {
+  const [, a, b] = RATIOS.find((r) => r[0] === ratio);
+  const r = a / b, area = size * size;
+  const w = Math.round(Math.sqrt(area * r) / 16) * 16, h = Math.round(Math.sqrt(area * r) / r / 16) * 16;
+  return [w, h];
+}
+function fmt(ms) {
+  if (ms == null || !isFinite(ms)) return "–";
+  const s = ms / 1000;
+  return s < 60 ? s.toFixed(1) + "s" : Math.floor(s / 60) + "m " + String(Math.round(s % 60)).padStart(2, "0") + "s";
+}
+function renderSeg() {
+  $("ratios").innerHTML = RATIOS.map(([k]) => `<button class="${k === ratio ? "on" : ""}" data-r="${k}">${k}</button>`).join("");
+  $("sizes").innerHTML = SIZES.map((s) => `<button class="${s === size ? "on" : ""}" data-s="${s}">${s}</button>`).join("");
+  const [w, h] = dims();
+  $("dims").textContent = `${w} × ${h}`;
+  $("canvas").style.aspectRatio = `${w} / ${h}`;
+  updateEta();
+}
+function updateEta() {
+  const [w, h] = dims(), steps = PRESETS[preset].steps;
+  const per = store.get(`spp.${w}x${h}.${$("ane").checked ? 1 : 0}.${preset}`, null);
+  $("eta").textContent = per ? `Estimated ≈ ${fmt(per * steps + 3000)} on this Mac (${(per / 1000).toFixed(2)} s/step measured).`
+    : "Krea 2 Turbo is trained for 1024–2048 px; 768 is a quick draft size.";
+}
+$("ratios").onclick = (e) => { if (e.target.dataset.r) { ratio = e.target.dataset.r; store.set("ratio", ratio); renderSeg(); } };
+$("sizes").onclick = (e) => { if (e.target.dataset.s) { size = +e.target.dataset.s; store.set("size", size); renderSeg(); } };
+function renderSpeed() {
+  $("speed").innerHTML = Object.entries(PRESETS).map(([k, v]) =>
+    `<button class="${k === preset ? "on" : ""}" data-p="${k}" ${k === "fast" && !fastAvail ? "disabled title=\"Install the 4-step LoRA weights first (see README)\"" : ""}>${v.label}</button>`).join("");
+  $("speedHint").textContent = PRESETS[preset].hint;
+}
+$("speed").onclick = (e) => {
+  const k = e.target.dataset.p; if (!k || e.target.disabled) return;
+  preset = k; store.set("preset", k);
+  renderSpeed(); updateEta();
+};
+$("dice").onclick = () => { $("seed").value = Math.floor(Math.random() * 2147483647); };
+$("ane").onchange = () => { store.set("ane", $("ane").checked); updateEta(); };
+$("prompt").value = store.get("prompt", "");
+$("pvSel").value = store.get("pvSel", "fast");
+$("pvSel").onchange = () => store.set("pvSel", $("pvSel").value);
+function renderPvMode() {
+  for (const b of $("pvMode").children) b.classList.toggle("on", b.dataset.k === pvKind);
+}
+$("pvMode").onclick = (e) => {
+  const k = e.target.dataset.k; if (!k) return;
+  pvKind = k; store.set("pvKind", k); renderPvMode(); pvShown = "";
+  if (job && lastJob) setPreview(lastJob);  // only while a generation is running
+};
+renderPvMode();
+
+// Live preview: fast 1/8-resolution latent projection every step (predicted image or the noisy latent
+// itself), or the real VAE decode every N steps when enabled. Frames are preloaded and swapped only once
+// decoded so the canvas never flickers.
+function setPreview(j) {
+  const hq = pvKind === "x0" && j.preview_hq_step;
+  const step = hq ? j.preview_hq_step : j.preview_step;
+  if (!step) return;
+  const kind = hq ? "hq" : pvKind;
+  const key = `${j.id}:${kind}:${step}`;
+  $("pvStep").textContent = `Step ${step} / ${j.total} · ${hq ? "VAE decode" : pvKind === "x0" ? "predicted image" : "noisy latent"}`;
+  if (key === pvShown) return;
+  pvShown = key;
+  const im = new Image();
+  im.onload = () => {
+    if (pvShown !== key || job !== j.id) return;  // stale frame or the run already finished
+    $("prev").src = im.src;
+    $("prev").classList.add("show");
+    $("img").classList.remove("show");
+    $("empty").style.display = "none";
+  };
+  im.src = `/api/preview/${j.id}?kind=${kind}&s=${step}`;
+}
+$("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); generate(); } });
+$("go").onclick = generate;
+
+// Prompt prefill: ~600 ms after the prompt stops changing, the server encodes it (text encoder + text
+// fusion) in the background whenever it is idle, so Generate starts denoising right away.
+let prepAvail = false, prepTimer = null, prepSent = "";
+function schedulePrepare() {
+  clearTimeout(prepTimer);
+  if ($("prompt").value.trim() !== prepSent) $("prepHint").classList.remove("show");
+  prepTimer = setTimeout(sendPrepare, 600);
+}
+async function sendPrepare() {
+  const prompt = $("prompt").value.trim();
+  if (!prepAvail || !prompt || prompt === prepSent) return;
+  prepSent = prompt;
+  let d;
+  try {
+    d = await (await fetch("/api/prepare", { method: "POST", body: JSON.stringify({ prompt, wait: 25 }) })).json();
+    while (d.id && (d.state === "queued" || d.state === "running") && prepSent === prompt)
+      d = await (await fetch(`/api/prepare/${d.id}?wait=25`)).json();
+  } catch { if (prepSent === prompt) prepSent = ""; return; }
+  if (prepSent === prompt && $("prompt").value.trim() === prompt) $("prepHint").classList.toggle("show", !!d.ready);
+}
+$("prompt").addEventListener("input", schedulePrepare);
+$("cancel").onclick = () => {
+  if (!job) return;
+  fetch(`/api/cancel/${job}`, { method: "POST" });
+  $("ovStage").textContent = "Cancelling… (stops at the next step)";
+};
+
+async function pollStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    ready = s.engine === "ready";
+    $("dot").className = "dot" + (ready ? " ok" : s.engine === "error" ? " err" : "");
+    $("statusText").textContent = ready ? (s.generating ? "Engine busy" : "Engine ready") : s.engine === "error" ? "Engine error" : "Loading engine…";
+    if (s.engine === "error") $("err").textContent = s.error;
+    const aneLocked = s.ane_available && s.gpu_only_available === false;  // no GPU-only weights installed
+    $("ane").disabled = !s.ane_available || aneLocked;
+    if (s.ane_available && !aneInit) { $("ane").checked = aneLocked || store.get("ane", true); aneInit = true; updateEta(); }
+    if (aneLocked) $("ane").checked = true;
+    if (!s.ane_available) $("ane").checked = false;
+    $("aneHint").textContent = !s.ane_available ? "GPU only (the Neural Engine programs are not built; see README)"
+      : aneLocked ? "GPU + Neural Engine split every DiT layer. GPU-only weights are not installed."
+      : "GPU + Neural Engine split every DiT layer. Off = GPU only (reloads weights).";
+    if (fastAvail !== !!s.fast_available) { fastAvail = !!s.fast_available; if (!fastAvail && preset === "fast") preset = "quality"; renderSpeed(); }
+    $("filterHint").textContent = s.content_filter ? `Content filter: ${s.content_filter}` : "";
+    if (!job) $("go").disabled = false;
+    const pa = ready && !!s.prepare_available;
+    if (pa && !prepAvail) { prepAvail = true; prepSent = ""; schedulePrepare(); }  // (re)started engine
+    prepAvail = pa;
+  } catch { $("statusText").textContent = "Server offline"; $("dot").className = "dot err"; prepAvail = false; }
+  setTimeout(pollStatus, ready ? 5000 : 1500);
+}
+
+async function generate() {
+  const prompt = $("prompt").value.trim();
+  if (!prompt || job) return;
+  store.set("prompt", prompt);
+  $("err").textContent = "";
+  clearTimeout(prepTimer); prepSent = prompt; $("prepHint").classList.remove("show");  // encoded by the run
+  const [w, h] = dims();
+  const body = { prompt, width: w, height: h, preset, seed: $("seed").value === "" ? null : +$("seed").value,
+    ane: $("ane").checked, preview: $("pvSel").value !== "off", hq_preview_every: { hq4: 4, hq2: 2 }[$("pvSel").value] || 0 };
+  const r = await fetch("/api/generate", { method: "POST", body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) { $("err").textContent = d.error || "request failed"; return; }
+  job = d.id;
+  pvShown = ""; lastJob = null;
+  $("canvas").style.aspectRatio = `${w} / ${h}`;
+  $("go").disabled = true; $("cancel").style.display = "";
+  $("overlay").classList.add("show"); $("ovBar").style.width = "0%";
+  $("ovStage").textContent = "Queued"; $("ovTime").textContent = "";
+  track(job, d.params);
+}
+
+async function track(id, params) {
+  let j;
+  try { j = await (await fetch(`/api/job/${id}`)).json(); } catch { setTimeout(() => track(id, params), 1000); return; }
+  const labels = { encode: "Encoding prompt", denoise: "Denoising", decode: "Decoding image", done: "Finishing",
+    queued: "Queued", loading: "Switching preset (loading weights)…" };
+  if (j.state === "queued") {
+    $("ovStage").textContent = j.queue_position ? `Queued (#${j.queue_position + 1})` : "Starting…";
+  } else if (j.state === "running") {
+    const frac = j.stage === "denoise" ? j.step / Math.max(1, j.total) : j.stage === "decode" || j.stage === "done" ? 1 : 0;
+    $("ovBar").style.width = (frac * 100).toFixed(1) + "%";
+    $("ovStage").textContent = j.stage === "denoise" ? `Denoising ${j.step} / ${j.total}` : labels[j.stage] || j.stage;
+    const left = j.step_ms && j.stage === "denoise" ? j.step_ms * (j.total - j.step) : null;
+    $("ovTime").textContent = `${fmt(j.elapsed_ms)} elapsed` + (left ? ` · ~${fmt(left)} left · ${(j.step_ms / 1000).toFixed(2)} s/step` : "");
+    if (j.stage === "denoise") lastJob = j;  // later stages report total = 1
+    if (j.stage === "denoise" && (j.preview_step || j.preview_hq_step)) { $("pvbar").classList.add("show"); setPreview(j); }
+  }
+  if (["done", "error", "cancelled"].includes(j.state)) {
+    job = null;
+    $("go").disabled = !ready; $("cancel").style.display = "none"; $("overlay").classList.remove("show");
+    $("pvbar").classList.remove("show");
+    if (j.state === "done") { show(j.result, true); loadHistory(); }
+    else if (lastJob) { $("prev").classList.remove("show"); }
+    if (j.state === "error") $("err").textContent = j.error;
+    if (j.state === "cancelled") $("err").textContent = "Cancelled.";
+    return;
+  }
+  setTimeout(() => track(id, params), 500);
+}
+
+// Deleting is permanent (the PNG and its JSON sidecar are removed from the outputs folder), so it takes
+// two clicks: the first arms the button, the second within 3 s deletes.
+let shownFile = null;
+function armOrRun(btn, armedLabel, run) {
+  if (btn.classList.contains("armed")) { clearTimeout(btn._t); run(); return; }
+  btn._label = btn.textContent;
+  btn.classList.add("armed");
+  btn.textContent = armedLabel;
+  btn._t = setTimeout(() => { btn.classList.remove("armed"); btn.textContent = btn._label; }, 3000);
+}
+async function deleteImage(file) {
+  const r = await fetch("/api/delete", { method: "POST", body: JSON.stringify({ file }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $("err").textContent = `Couldn't delete: ${d.error || r.status}`; return; }
+  $("err").textContent = "";
+  if (file === shownFile) clearCanvas();
+  loadHistory();
+}
+function clearCanvas() {
+  shownFile = null;
+  $("img").classList.remove("show"); $("img").removeAttribute("src");
+  $("prev").classList.remove("show");
+  $("stats").innerHTML = "";
+  $("empty").style.display = "";
+}
+
+function show(m, fromPreview = false) {
+  const s = m.stats || {};
+  shownFile = m.file;
+  for (const el of $("gallery").children) el.classList.toggle("current", el.dataset.file === m.file);
+  if (s.step_ms) store.set(`spp.${m.width}x${m.height}.${m.ane ? 1 : 0}.${m.preset || "quality"}`, s.step_ms);
+  $("empty").style.display = "none";
+  // Crossfade: the final image fades in above the live preview, which is then retired.
+  const img = $("img");
+  img.classList.remove("show");
+  img.onload = () => {
+    img.classList.add("show");
+    setTimeout(() => { if (img.classList.contains("show")) $("prev").classList.remove("show"); }, fromPreview ? 750 : 0);
+  };
+  const src = `/outputs/${m.file}`;
+  if (img.getAttribute("src") === src && img.complete) img.onload();
+  else img.setAttribute("src", src);
+  $("canvas").style.aspectRatio = `${m.width} / ${m.height}`;
+  $("stats").innerHTML = [
+    `<span class="chip"><b>${fmt(s.total_ms)}</b> total</span>`,
+    `<span class="chip"><b>${(s.step_ms / 1000).toFixed(2)}s</b> / step × ${m.steps}</span>`,
+    `<span class="chip">encode ${fmt(s.encode_ms)}${s.cached_prompt ? " (cached)" : ""} · decode ${fmt(s.decode_ms)}</span>`,
+    `<span class="chip">${m.width}×${m.height} · seed ${m.seed} · ${m.preset === "fast" ? "Fast (4-step LoRA)" : "Quality"}${m.ane ? " · ANE" : ""}</span>`,
+    `<a href="/outputs/${m.file}" download>Download PNG</a>`,
+    `<button class="linkbtn danger" id="delCur" title="Permanently delete this image and its settings file">Delete</button>`,
+  ].join("");
+  $("delCur").onclick = (e) => armOrRun(e.currentTarget, "Click again to delete", () => deleteImage(m.file));
+  updateEta();
+}
+
+async function loadHistory() {
+  const items = await (await fetch("/api/history")).json();
+  $("histPanel").style.display = items.length ? "" : "none";
+  const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  $("gallery").innerHTML = items.map((m, i) => `<div class="gitem${m.file === shownFile ? " current" : ""}" data-i="${i}" data-file="${esc(m.file)}">
+      <button class="gthumb" title="${esc(m.prompt)}"><img loading="lazy" src="/outputs/${esc(m.file)}" alt=""></button>
+      <button class="gdel" title="Delete this image (removes the file)" aria-label="Delete image">✕</button></div>`).join("");
+  $("gallery").onclick = (e) => {
+    const item = e.target.closest(".gitem"); if (!item) return;
+    const m = items[+item.dataset.i];
+    const del = e.target.closest(".gdel");
+    if (del) { armOrRun(del, "Delete?", () => deleteImage(m.file)); return; }
+    show(m);
+    if (PRESETS[m.preset] && (m.preset !== "fast" || fastAvail)) { preset = m.preset; store.set("preset", preset); }
+    renderSpeed();
+    $("prompt").value = m.prompt; $("seed").value = m.seed;
+  };
+}
+
+renderSpeed(); renderSeg(); pollStatus(); loadHistory();
+</script>
+</body>
+</html>

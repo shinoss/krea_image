@@ -5,13 +5,19 @@
 One generation runs at a time (the engine owns the whole GPU/ANE); further requests queue. Images and
 their settings are saved to outputs/ (PNG + JSON sidecar).
 
+Editing (image-to-image / inpainting; Krea 2 has no instruction-editing mode): /api/generate with an "edit"
+object {"file": <an image in the outputs folder> | "image": <data URL>, "mask": <data URL, white = change> | null,
+"start_step": k} VAE-encodes the source, noises it to sigma[k] and denoises from there (a later start keeps more
+of it); with a mask only that area changes and the source pixels are kept elsewhere.
+
 While the user types, the UI posts the prompt to /api/prepare: when no generation is running or
 queued, the worker encodes it ahead (text encoder + text fusion, cached in the engine), so Generate
 starts denoising right away. A newer prepare replaces a pending one. /api/status reports "busy" while
 either runs (dev/bench/gpu_lock.py waits on it), "generating" for a generation only.
 
 Every request passes the content-filter hook (ui/content_filter.py; required by the Krea 2 Turbo model card):
-the prompt before any work, the image before it is saved or shown.
+the prompt before any work, the image before it is saved or shown (edit sources included: a blocked prompt never
+reaches the engine, and the edited image is checked like any other).
 
 Everything the process prints (including the native engine's stderr) is also written to
 logs/server.log. logs/server.state.json records {pid, port} while the server runs so a launcher
@@ -187,6 +193,7 @@ def run_job(job):
     job["state"] = "running"
     job["started"] = time.time()
     p = job["params"]
+    src, mask = job.pop("_edit", (None, None))  # the edit source and mask (PIL), dropped with this call
 
     def progress(stage, step, total, ms, preview=None):
         job.update(stage=stage, step=step, total=total, elapsed_ms=ms)
@@ -213,7 +220,8 @@ def run_job(job):
             return
         img, stats = S.engine.generate(p["prompt"], p["width"], p["height"], p["steps"], p["seed"], fast=p["fast"],
                                        ane=p.get("ane", True), progress=progress, preview=p.get("preview", True),
-                                       hq_preview_every=p.get("hq_preview_every", 0))
+                                       hq_preview_every=p.get("hq_preview_every", 0), init_image=src, mask=mask,
+                                       start_step=p["edit"]["start_step"] if src is not None else 0)
         if img is None:
             job["state"] = "cancelled"
             return
@@ -225,7 +233,7 @@ def run_job(job):
                 job.pop(k, None)
             return
         os.makedirs(OUT, exist_ok=True)
-        name = time.strftime("%Y%m%d-%H%M%S") + f"-{p['seed']}"
+        name = time.strftime("%Y%m%d-%H%M%S") + f"-{p['seed']}" + ("-edit" if src is not None else "")
         img.save(os.path.join(OUT, name + ".png"))
         meta = {"prompt": p["prompt"], **{k: v for k, v in p.items() if k != "prompt"}, "stats": stats,
                 "file": name + ".png", "created": time.time(), "model": "Krea 2 Turbo"}
@@ -251,6 +259,56 @@ def history(limit=48):
         if len(items) >= limit:
             break
     return items
+
+
+def decode_data_url(url, what):
+    """PIL image from a data: URL (PNG / JPEG / WebP ...)."""
+    import base64
+
+    from PIL import Image
+
+    if not isinstance(url, str) or not url.startswith("data:") or "," not in url:
+        raise ValueError(f"the {what} must be a data: URL")
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1])))
+        img.load()
+    except Exception:
+        raise ValueError(f"couldn't read the {what}")
+    return img
+
+
+def parse_edit(e, steps):
+    """Validate an edit request -> {"image": PIL RGB, "mask": PIL L | None, "width", "height", "info"}.
+    The size follows the source: scaled down to fit 2048 px and rounded down to multiples of 16."""
+    from PIL import Image
+
+    if e.get("file"):
+        fn = str(e["file"])
+        if fn != os.path.basename(fn) or not SAFE_IMAGE_NAME.match(fn) or not os.path.isfile(os.path.join(OUT, fn)):
+            raise ValueError("no such image in the outputs folder")
+        src, source = Image.open(os.path.join(OUT, fn)), fn
+        src.load()
+    else:
+        src, source = decode_data_url(e.get("image"), "source image"), "upload"
+    src = src.convert("RGB")
+    w, h = src.size
+    scale = min(1.0, 2048 / max(w, h))
+    w, h = int(w * scale) // 16 * 16, int(h * scale) // 16 * 16
+    if min(w, h) < 256:
+        raise ValueError("the image is too small to edit (at least 256 px per side)")
+    if (w, h) != src.size:
+        src = src.resize((w, h), Image.LANCZOS)
+    mask = None
+    if e.get("mask"):
+        mask = decode_data_url(e["mask"], "mask")
+        mask = (mask.getchannel("A") if mask.mode in ("RGBA", "LA") else mask.convert("L")).resize((w, h), Image.BILINEAR)
+        if mask.point(lambda v: 255 if v >= 128 else 0).getbbox() is None:
+            mask = None  # nothing painted: edit the whole image
+    k = clamp_int(e.get("start_step"), 0, steps - 1, max(1, steps // 2))
+    if mask is None and k == 0:
+        k = 1  # without a mask, step 0 would ignore the source entirely
+    return {"image": src, "mask": mask, "width": w, "height": h,
+            "info": {"source": source, "start_step": k, "masked": mask is not None}}
 
 
 def clamp_int(v, lo, hi, default):
@@ -363,10 +421,16 @@ class Handler(SimpleHTTPRequestHandler):
             steps = PRESETS[preset]["steps"]
             if preset == "quality" and body.get("steps"):
                 steps = clamp_int(body.get("steps"), 1, 32, 8)
+            edit = None
+            if body.get("edit"):
+                try:
+                    edit = parse_edit(body["edit"], steps)
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
             params = {
                 "prompt": prompt,
-                "width": clamp_int(body.get("width"), 256, 2048, 1024) // 16 * 16,
-                "height": clamp_int(body.get("height"), 256, 2048, 1024) // 16 * 16,
+                "width": edit["width"] if edit else clamp_int(body.get("width"), 256, 2048, 1024) // 16 * 16,
+                "height": edit["height"] if edit else clamp_int(body.get("height"), 256, 2048, 1024) // 16 * 16,
                 "preset": preset,
                 "steps": steps,
                 "fast": PRESETS[preset]["fast"],
@@ -375,9 +439,14 @@ class Handler(SimpleHTTPRequestHandler):
                 "preview": bool(body.get("preview", True)),
                 "hq_preview_every": clamp_int(body.get("hq_preview_every"), 0, 32, 0),
             }
+            if edit:
+                params["edit"] = edit["info"]
             jid = uuid.uuid4().hex[:10]
             job = {"id": jid, "state": "queued", "params": params, "created": time.time(), "cancel": False,
-                   "stage": "queued", "step": 0, "total": params["steps"], "elapsed_ms": 0}
+                   "stage": "queued", "step": 0, "total": params["steps"] - (edit["info"]["start_step"] if edit else 0),
+                   "elapsed_ms": 0}
+            if edit:
+                job["_edit"] = (edit["image"], edit["mask"])
             with S.lock:
                 S.jobs[jid] = job
                 S.order.append(jid)

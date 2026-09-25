@@ -260,3 +260,18 @@ kernel void cfg_combine(device float* vc [[buffer(0)]], device const float* vn [
                         constant CfgParams& p [[buffer(2)]], uint gid [[thread_position_in_grid]]) {
   if ((int)gid < p.n) vc[gid] = vc[gid] + p.scale * (vc[gid] - vn[gid]);
 }
+
+// Masked editing: after each Euler step, the latent outside the mask is reset to the source at the new noise
+// level, z = m z + (1 - m) ((1 - sigma) x0 + sigma eps), so only the masked region is generated while the
+// model still sees (and blends with) the whole image. m is 1 inside the edited region.
+struct BlendParams { uint n; float keep, noise; };
+kernel void latent_blend(device float* z [[buffer(0)]],
+                         device const float* x0 [[buffer(1)]],
+                         device const float* eps [[buffer(2)]],
+                         device const float* m [[buffer(3)]],
+                         constant BlendParams& p [[buffer(4)]],
+                         uint i [[thread_position_in_grid]]) {
+  if (i >= p.n) return;
+  const float a = m[i];
+  z[i] = a * z[i] + (1.0f - a) * (p.keep * x0[i] + p.noise * eps[i]);
+}

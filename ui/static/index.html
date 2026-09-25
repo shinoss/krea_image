@@ -111,6 +111,7 @@ select { width: 100%; background: var(--bg); color: var(--ink); border: 1px soli
 .chip b { font-weight: 650; }
 .stats a { margin-left: auto; color: var(--accent); text-decoration: none; font-weight: 600; font-size: 13px; }
 .stats .linkbtn { margin-left: 4px; }
+.stats .linkbtn:not(.danger) { color: var(--accent); }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
 .gitem { position: relative; aspect-ratio: 1; }
 .gthumb { width: 100%; height: 100%; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
@@ -126,6 +127,25 @@ select { width: 100%; background: var(--bg); color: var(--ink); border: 1px soli
 .linkbtn.danger.armed { background: var(--err); color: #fff; padding: 3px 10px; border-radius: 999px; }
 .gthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .err { color: var(--err); font-size: 13px; }
+.editcard { display: none; flex-direction: column; gap: 12px; border: 1px solid var(--accent); background: var(--accent-soft);
+  border-radius: 12px; padding: 12px; }
+.editcard.show { display: flex; }
+.edit-head { display: flex; align-items: center; gap: 10px; }
+.edit-head img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); flex: 0 0 auto; }
+.edit-head div { flex: 1; min-width: 0; }
+.edit-head small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edit-head .linkbtn { color: var(--accent); }
+.tools { display: flex; gap: 6px; }
+.tools button { flex: 1; padding: 7px 0; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
+  font: inherit; font-size: 12.5px; cursor: pointer; }
+.tools button.on { background: var(--panel); border-color: var(--accent); font-weight: 600; }
+.maskcv { position: absolute; z-index: 5; display: none; opacity: .45; cursor: crosshair; touch-action: none; }
+.maskcv.on { display: block; }
+.maskcv.off { pointer-events: none; cursor: default; }
+.gedit { position: absolute; top: 5px; left: 5px; height: 22px; min-width: 22px; padding: 0 6px; border-radius: 999px; border: 0;
+  background: rgba(20, 20, 20, .62); color: #fff; font: inherit; font-size: 11px; line-height: 22px; cursor: pointer;
+  opacity: 0; transition: opacity .15s; }
+.gitem:hover .gedit, .gedit:focus-visible { opacity: 1; }
 kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
 </style>
 </head>
@@ -140,6 +160,30 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 
 <main>
   <section class="panel controls">
+    <div class="editcard" id="editCard">
+      <div class="edit-head">
+        <img id="editThumb" alt="">
+        <div><b>Editing an image</b><small id="editName"></small></div>
+        <button class="linkbtn" id="editExit" title="Back to generating new images">Done</button>
+      </div>
+      <div>
+        <label class="h" for="amount">Change amount <span class="v" id="amountLabel"></span></label>
+        <input type="range" id="amount" min="1" max="7" step="1">
+        <div class="hint" id="amountHint"></div>
+      </div>
+      <div>
+        <label class="h">Area to change <span class="v" id="maskState">whole image</span></label>
+        <div class="tools">
+          <button id="brushBtn" class="on" title="Paint over the part of the image to change">Paint</button>
+          <button id="eraseBtn" title="Remove painted area">Erase</button>
+          <button id="clearMask" title="Clear the painted area">Clear</button>
+        </div>
+        <label class="h" for="brush" style="margin-top:8px">Brush size <span class="v" id="brushLabel"></span></label>
+        <input type="range" id="brush" min="8" max="320" step="4">
+        <div class="hint">Nothing painted: the whole image changes. Painted: only that area changes and the rest keeps its original pixels.</div>
+      </div>
+    </div>
+
     <div>
       <label class="h" for="prompt">Prompt</label>
       <textarea id="prompt" placeholder="A small red fox curled up asleep in fresh snow at dawn, soft pink light, shallow depth of field, photograph"></textarea>
@@ -147,12 +191,12 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
         title="The prompt is already encoded: Generate starts denoising right away."> · prompt ready</span></div>
     </div>
 
-    <div>
+    <div id="ratioBlock">
       <label class="h">Aspect ratio <span class="v" id="dims">1024 × 1024</span></label>
       <div class="seg" id="ratios"></div>
     </div>
 
-    <div>
+    <div id="sizeBlock">
       <label class="h">Resolution</label>
       <div class="seg sizes" id="sizes"></div>
     </div>
@@ -193,6 +237,8 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
       <button class="primary" id="go" disabled>Generate</button>
       <button class="secondary" id="cancel" style="display:none">Cancel</button>
     </div>
+    <button class="secondary" id="openBtn" title="Open an image from this Mac and edit it">Edit an image…</button>
+    <input type="file" id="fileIn" accept="image/png,image/jpeg,image/webp" style="display:none">
     <div class="err" id="err"></div>
     <div class="hint" id="filterHint"></div>
   </section>
@@ -202,6 +248,7 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
       <div class="empty" id="empty"><b>Nothing here yet</b>Write a prompt and press Generate. The first run after startup pages the weights into memory.</div>
       <img id="prev" class="layer" alt="">
       <img id="img" class="layer" alt="">
+      <canvas id="maskCv" class="maskcv"></canvas>
       <div class="pvbar" id="pvbar">
         <span class="pvstep" id="pvStep"></span>
         <div class="pvmode" id="pvMode"><button data-k="x0">Predicted image</button><button data-k="noisy">Noisy latent</button></div>
@@ -229,6 +276,9 @@ const store = {
 };
 let ratio = store.get("ratio", "1:1"), size = store.get("size", 1024), job = null, ready = false, aneInit = false;
 let pvKind = store.get("pvKind", "x0"), pvShown = "", lastJob = null, fastAvail = false;
+// Editing: {file?, dataUrl?, url, w, h, name, prompt} while an image is being edited, else null.
+let edit = null, brushOn = true, erasing = false, drawing = false, lastPt = null, maskDirty = false;
+let brush = store.get("brush", 64);
 
 // Presets: Quality = the official 8-step Turbo schedule; Fast = the 4-step distillation LoRA
 // (lvladikov/Krea2-Turbo-Distill-4step-LoRA, merged into the weights), on Turbo's own sigmas.
@@ -261,7 +311,7 @@ function renderSeg() {
   updateEta();
 }
 function updateEta() {
-  const [w, h] = dims(), steps = PRESETS[preset].steps;
+  const [w, h] = edit ? [edit.w, edit.h] : dims(), steps = edit ? PRESETS[preset].steps - startStep() : PRESETS[preset].steps;
   const per = store.get(`spp.${w}x${h}.${$("ane").checked ? 1 : 0}.${preset}`, null);
   $("eta").textContent = per ? `Estimated ≈ ${fmt(per * steps + 3000)} on this Mac (${(per / 1000).toFixed(2)} s/step measured).`
     : "Krea 2 Turbo is trained for 1024–2048 px; 768 is a quick draft size.";
@@ -277,6 +327,7 @@ $("speed").onclick = (e) => {
   const k = e.target.dataset.p; if (!k || e.target.disabled) return;
   preset = k; store.set("preset", k);
   renderSpeed(); updateEta();
+  if (edit) renderAmount();
 };
 $("dice").onclick = () => { $("seed").value = Math.floor(Math.random() * 2147483647); };
 $("ane").onchange = () => { store.set("ane", $("ane").checked); updateEta(); };
@@ -376,12 +427,18 @@ async function generate() {
   store.set("prompt", prompt);
   $("err").textContent = "";
   clearTimeout(prepTimer); prepSent = prompt; $("prepHint").classList.remove("show");  // encoded by the run
-  const [w, h] = dims();
+  let [w, h] = edit ? [edit.w, edit.h] : dims();
   const body = { prompt, width: w, height: h, preset, seed: $("seed").value === "" ? null : +$("seed").value,
     ane: $("ane").checked, preview: $("pvSel").value !== "off", hq_preview_every: { hq4: 4, hq2: 2 }[$("pvSel").value] || 0 };
+  if (edit) {
+    body.edit = { start_step: startStep(), mask: maskDirty ? $("maskCv").toDataURL("image/png") : null };
+    if (edit.file) body.edit.file = edit.file; else body.edit.image = edit.dataUrl;
+  }
   const r = await fetch("/api/generate", { method: "POST", body: JSON.stringify(body) });
-  const d = await r.json();
+  const d = await r.json().catch(() => ({ error: `request failed (${r.status})` }));
   if (!r.ok) { $("err").textContent = d.error || "request failed"; return; }
+  if (d.params) { w = d.params.width; h = d.params.height; }
+  if (edit) $("maskCv").classList.remove("on");  // the live preview replaces the source while it runs
   job = d.id;
   pvShown = ""; lastJob = null;
   $("canvas").style.aspectRatio = `${w} / ${h}`;
@@ -411,8 +468,9 @@ async function track(id, params) {
     job = null;
     $("go").disabled = !ready; $("cancel").style.display = "none"; $("overlay").classList.remove("show");
     $("pvbar").classList.remove("show");
-    if (j.state === "done") { show(j.result, true); loadHistory(); }
+    if (j.state === "done") { if (edit) exitEdit(); show(j.result, true); loadHistory(); }
     else if (lastJob) { $("prev").classList.remove("show"); }
+    if (j.state !== "done" && edit) { $("img").classList.add("show"); $("maskCv").classList.add("on"); layoutMask(); }
     if (j.state === "error") $("err").textContent = j.error;
     if (j.state === "cancelled") $("err").textContent = "Cancelled.";
     return;
@@ -435,6 +493,7 @@ async function deleteImage(file) {
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { $("err").textContent = `Couldn't delete: ${d.error || r.status}`; return; }
   $("err").textContent = "";
+  if (edit && edit.file === file) exitEdit();
   if (file === shownFile) clearCanvas();
   loadHistory();
 }
@@ -465,13 +524,16 @@ function show(m, fromPreview = false) {
   $("canvas").style.aspectRatio = `${m.width} / ${m.height}`;
   $("stats").innerHTML = [
     `<span class="chip"><b>${fmt(s.total_ms)}</b> total</span>`,
-    `<span class="chip"><b>${(s.step_ms / 1000).toFixed(2)}s</b> / step × ${m.steps}</span>`,
+    `<span class="chip"><b>${(s.step_ms / 1000).toFixed(2)}s</b> / step × ${m.edit ? m.steps - m.edit.start_step : m.steps}</span>`,
     `<span class="chip">encode ${fmt(s.encode_ms)}${s.cached_prompt ? " (cached)" : ""} · decode ${fmt(s.decode_ms)}</span>`,
     `<span class="chip">${m.width}×${m.height} · seed ${m.seed} · ${m.preset === "fast" ? "Fast (4-step LoRA)" : "Quality"}${m.ane ? " · ANE" : ""}</span>`,
+    m.edit ? `<span class="chip">edit of ${m.edit.source === "upload" ? "an opened image" : m.edit.source}${m.edit.masked ? " · painted area" : ""}</span>` : "",
     `<a href="/outputs/${m.file}" download>Download PNG</a>`,
+    `<button class="linkbtn" id="editCur" title="Edit this image: change it with a new prompt, or paint an area to change">Edit</button>`,
     `<button class="linkbtn danger" id="delCur" title="Permanently delete this image and its settings file">Delete</button>`,
   ].join("");
   $("delCur").onclick = (e) => armOrRun(e.currentTarget, "Click again to delete", () => deleteImage(m.file));
+  $("editCur").onclick = () => editOutput(m);
   updateEta();
 }
 
@@ -481,18 +543,158 @@ async function loadHistory() {
   const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   $("gallery").innerHTML = items.map((m, i) => `<div class="gitem${m.file === shownFile ? " current" : ""}" data-i="${i}" data-file="${esc(m.file)}">
       <button class="gthumb" title="${esc(m.prompt)}"><img loading="lazy" src="/outputs/${esc(m.file)}" alt=""></button>
+      <button class="gedit" title="Edit this image" aria-label="Edit image">✎</button>
       <button class="gdel" title="Delete this image (removes the file)" aria-label="Delete image">✕</button></div>`).join("");
   $("gallery").onclick = (e) => {
     const item = e.target.closest(".gitem"); if (!item) return;
     const m = items[+item.dataset.i];
     const del = e.target.closest(".gdel");
     if (del) { armOrRun(del, "Delete?", () => deleteImage(m.file)); return; }
+    if (e.target.closest(".gedit")) { editOutput(m); return; }
+    if (job) return;
+    if (edit) exitEdit();
     show(m);
     if (PRESETS[m.preset] && (m.preset !== "fast" || fastAvail)) { preset = m.preset; store.set("preset", preset); }
     renderSpeed();
     $("prompt").value = m.prompt; $("seed").value = m.seed;
   };
 }
+
+// ---- Editing (image-to-image / inpainting) ----
+// Krea 2 has no instruction-editing mode: an edit VAE-encodes the source, re-noises it to sigma[k] of the preset's
+// schedule and denoises it with the (edited) prompt, so a later start step keeps more of the original. A painted
+// area limits the change to that region; everything else keeps its original pixels.
+function sigmas(n) {  // engine/src/model.mm krea_sigmas(): shifted linspace(1, 0, n + 1), mu = 1.15
+  const e = Math.exp(1.15), out = [];
+  for (let i = 0; i <= n; i++) { const t = 1 - i / n; out.push(t <= 0 ? 0 : e / (e + 1 / t - 1)); }
+  return out;
+}
+function startStep() { return PRESETS[preset].steps - (+$("amount").value || 1); }
+function renderAmount() {
+  const n = PRESETS[preset].steps, a = $("amount");
+  a.max = maskDirty ? n : n - 1;  // starting from pure noise only makes sense inside a painted area
+  a.value = Math.min(Math.max(+a.value || 1, 1), +a.max);
+  const k = startStep(), sg = sigmas(n)[k];
+  const [label, hint] = sg >= 0.999 ? ["Replace", "New content in the painted area, blended into its surroundings."]
+    : sg < 0.4 ? ["Touch-up", "Refines details and texture; composition and colors stay."]
+    : sg < 0.6 ? ["Light", "Keeps the composition and colors; changes details."]
+    : sg < 0.8 ? ["Medium", "Keeps the layout; can change style, lighting and content."]
+    : ["Strong", "Big changes that loosely follow the original layout."];
+  $("amountLabel").textContent = `${label} · ${n - k} of ${n} steps`;
+  $("amountHint").textContent = hint;
+  store.set("amount", +a.value);
+  updateEta();
+}
+$("amount").oninput = renderAmount;
+
+function editOutput(m) {
+  enterEdit({ file: m.file, url: `/outputs/${m.file}`, w: m.width, h: m.height, name: m.file, prompt: m.prompt });
+}
+function enterEdit(src) {
+  if (job) return;
+  edit = src;
+  $("err").textContent = "";
+  $("editCard").classList.add("show");
+  $("ratioBlock").style.display = $("sizeBlock").style.display = "none";
+  $("editThumb").src = src.url;
+  $("editName").textContent = `${src.name} · ${src.w} × ${src.h}`;
+  if (src.prompt) { $("prompt").value = src.prompt; schedulePrepare(); }
+  $("prompt").focus();
+  $("canvas").style.aspectRatio = `${src.w} / ${src.h}`;
+  const img = $("img");
+  img.onload = () => { img.classList.add("show"); layoutMask(); };
+  img.setAttribute("src", src.url);
+  $("prev").classList.remove("show");
+  $("empty").style.display = "none";
+  $("stats").innerHTML = `<span class="chip">Editing · ${src.w}×${src.h}</span>`;
+  shownFile = src.file || null;
+  for (const el of $("gallery").children) el.classList.toggle("current", el.dataset.file === shownFile);
+  const cv = $("maskCv");
+  cv.width = src.w; cv.height = src.h;  // (also clears it)
+  cv.classList.add("on");
+  setBrushMode(true, false);
+  $("amount").value = store.get("amount", 4);
+  updateMaskState();
+  $("go").textContent = "Apply edit";
+  layoutMask();
+}
+function exitEdit() {
+  edit = null;
+  $("editCard").classList.remove("show");
+  $("ratioBlock").style.display = $("sizeBlock").style.display = "";
+  $("maskCv").classList.remove("on");
+  $("go").textContent = "Generate";
+  updateEta();
+}
+$("editExit").onclick = () => { if (!job) exitEdit(); };
+
+// The mask canvas has the image's pixel size and sits exactly over the displayed image (object-fit: contain).
+function layoutMask() {
+  if (!edit) return;
+  const c = $("canvas"), bw = c.clientWidth, bh = c.clientHeight, sc = Math.min(bw / edit.w, bh / edit.h);
+  const w = edit.w * sc, h = edit.h * sc;
+  Object.assign($("maskCv").style, { left: `${(bw - w) / 2}px`, top: `${(bh - h) / 2}px`, width: `${w}px`, height: `${h}px` });
+}
+new ResizeObserver(layoutMask).observe($("canvas"));
+function setBrushMode(on, erase) {
+  brushOn = on; erasing = erase;
+  $("brushBtn").classList.toggle("on", on && !erase);
+  $("eraseBtn").classList.toggle("on", on && erase);
+  $("maskCv").classList.toggle("off", !on);
+}
+$("brushBtn").onclick = () => setBrushMode(!(brushOn && !erasing), false);
+$("eraseBtn").onclick = () => setBrushMode(!(brushOn && erasing), true);
+$("clearMask").onclick = () => { const cv = $("maskCv"); cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); updateMaskState(); };
+$("brush").value = brush; $("brushLabel").textContent = `${brush} px`;
+$("brush").oninput = () => { brush = +$("brush").value; store.set("brush", brush); $("brushLabel").textContent = `${brush} px`; };
+function maskPoint(e) {
+  const cv = $("maskCv"), r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height };
+}
+function strokeTo(a, b) {
+  const ctx = $("maskCv").getContext("2d");
+  ctx.globalCompositeOperation = erasing ? "destination-out" : "source-over";
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#d9480f";
+  ctx.lineWidth = brush; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x + 0.01, b.y); ctx.stroke();
+}
+$("maskCv").onpointerdown = (e) => {
+  if (!edit || job || !brushOn) return;
+  e.preventDefault();
+  $("maskCv").setPointerCapture(e.pointerId);
+  drawing = true; lastPt = maskPoint(e); strokeTo(lastPt, lastPt);
+};
+$("maskCv").onpointermove = (e) => { if (!drawing) return; const p = maskPoint(e); strokeTo(lastPt, p); lastPt = p; };
+$("maskCv").onpointerup = $("maskCv").onpointercancel = () => { if (drawing) { drawing = false; updateMaskState(); } };
+function updateMaskState() {
+  const cv = $("maskCv"), d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+  let n = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] >= 128) n++;
+  maskDirty = n > 0;
+  $("maskState").textContent = maskDirty ? `painted · ${Math.max(1, Math.round(100 * n / (cv.width * cv.height)))}% of the image` : "whole image";
+  renderAmount();
+}
+
+// Open an image from this Mac: same size rule as the server (fit 2048 px, multiples of 16).
+$("openBtn").onclick = () => { if (!job) $("fileIn").click(); };
+$("fileIn").onchange = () => {
+  const f = $("fileIn").files[0];
+  $("fileIn").value = "";
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const im = new Image();
+    im.onload = () => {
+      const sc = Math.min(1, 2048 / Math.max(im.naturalWidth, im.naturalHeight));
+      const w = Math.floor(im.naturalWidth * sc / 16) * 16, h = Math.floor(im.naturalHeight * sc / 16) * 16;
+      if (Math.min(w, h) < 256) { $("err").textContent = "That image is too small to edit (at least 256 px per side)."; return; }
+      enterEdit({ url: rd.result, dataUrl: rd.result, w, h, name: f.name, prompt: "" });
+    };
+    im.onerror = () => { $("err").textContent = "Couldn't read that image (PNG, JPEG or WebP)."; };
+    im.src = rd.result;
+  };
+  rd.readAsDataURL(f);
+};
 
 renderSpeed(); renderSeg(); pollStatus(); loadHistory();
 </script>

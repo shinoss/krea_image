@@ -1,4 +1,6 @@
 // End-to-end text-to-image pipeline + C API.
+#include <mach/mach.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -20,8 +22,87 @@
 
 namespace krea {
 
+// Inpainting masks from the user's brush mask (bytes, >= 128 = regenerate): a pixel alpha for the final
+// composite (the brush, dilated by kDilate px, then feathered with two box blurs of radius kFeather: 1 on the
+// brush, easing to 0 over ~2 * kFeather px outside it) and the packed latent mask [H/16 * W/16, 64] (1 where
+// the latent pixel's 8x8 block has any alpha, dilated by one latent pixel so the model regenerates the whole
+// transition). Returns false if the mask is empty (edit the whole image).
+static bool edit_masks(const uint8_t* mask, int W, int H, std::vector<float>& packed, std::vector<float>& alpha) {
+  constexpr int kDilate = 6, kFeather = 8;
+  const size_t P = (size_t)W * H;
+  std::vector<float> a(P);
+  bool any = false;
+  for (size_t i = 0; i < P; i++) any |= (a[i] = mask[i] >= 128 ? 1.0f : 0.0f) > 0;
+  if (!any) return false;
+  // separable box filter over radius r: mean (blur) or max-like test (> 0) for dilation
+  auto box = [&](std::vector<float>& v, int r, bool dilate) {
+    std::vector<float> t(P);
+    for (int pass = 0; pass < 2; pass++) {  // pass 0: rows, pass 1: columns
+      const int n = pass ? H : W, lines = pass ? W : H;
+      for (int l = 0; l < lines; l++) {
+        auto at = [&](int k) -> float& { return pass ? v[(size_t)k * W + l] : v[(size_t)l * W + k]; };
+        auto out = [&](int k) -> float& { return pass ? t[(size_t)k * W + l] : t[(size_t)l * W + k]; };
+        double sum = 0;
+        for (int k = -r; k <= r; k++) sum += at(std::clamp(k, 0, n - 1));
+        for (int k = 0; k < n; k++) {
+          out(k) = dilate ? (sum > 0 ? 1.0f : 0.0f) : (float)(sum / (2 * r + 1));
+          sum += at(std::min(k + r + 1, n - 1)) - at(std::max(k - r, 0));
+        }
+      }
+      v.swap(t);
+    }
+  };
+  std::vector<float> brush = a;
+  box(a, kDilate, true);
+  box(a, kFeather, false);
+  box(a, kFeather, false);
+  for (size_t i = 0; i < P; i++) a[i] = std::max(a[i], brush[i]);
+  const int W8 = W / 8, H8 = H / 8, W16 = W / 16, H16 = H / 16;
+  std::vector<uint8_t> lat((size_t)W8 * H8, 0), lat2((size_t)W8 * H8, 0);
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++)
+      if (a[(size_t)y * W + x] > 1e-3f) lat[(size_t)(y / 8) * W8 + x / 8] = 1;
+  for (int y = 0; y < H8; y++)
+    for (int x = 0; x < W8; x++)
+      for (int dy = -1; dy <= 1 && !lat2[(size_t)y * W8 + x]; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          const int yy = y + dy, xx = x + dx;
+          if (yy >= 0 && yy < H8 && xx >= 0 && xx < W8 && lat[(size_t)yy * W8 + xx]) {
+            lat2[(size_t)y * W8 + x] = 1;
+            break;
+          }
+        }
+  packed.assign((size_t)H16 * W16 * 64, 0.0f);
+  for (int ty = 0; ty < H16; ty++)
+    for (int tx = 0; tx < W16; tx++)
+      for (int c = 0; c < 16; c++)
+        for (int py = 0; py < 2; py++)
+          for (int px = 0; px < 2; px++)
+            packed[((size_t)ty * W16 + tx) * 64 + c * 4 + py * 2 + px] = lat2[(size_t)(2 * ty + py) * W8 + 2 * tx + px];
+  alpha.swap(a);
+  return true;
+}
+
+
 static double now_ms() {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// KREA_MEM=1: memory at each stage (stderr): system-wide wired memory (what can never be paged out: Metal
+// residency, ANE programs), this process's footprint and the Metal allocations.
+static void mem_report(krea::Metal& m, const char* what) {
+  static const bool on = getenv("KREA_MEM") != nullptr;
+  if (!on) return;
+  vm_statistics64_data_t vs;
+  mach_msg_type_number_t n = HOST_VM_INFO64_COUNT;
+  host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &n);
+  task_vm_info_data_t ti;
+  mach_msg_type_number_t tn = TASK_VM_INFO_COUNT;
+  task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &tn);
+  const double page = (double)vm_kernel_page_size;
+  fprintf(stderr, "[mem] %-28s wired %6.2f GB | free %6.2f GB | footprint %6.2f GB | Metal allocated %6.2f GB\n", what,
+          vs.wire_count * page / 1e9, vs.free_count * page / 1e9, ti.phys_footprint / 1e9,
+          [m.dev currentAllocatedSize] / 1e9);
 }
 
 // Deterministic N(0,1) noise: splitmix64 counter stream + Box-Muller.
@@ -79,16 +160,22 @@ class Engine {
  public:
   explicit Engine(const std::string& root) : root_(root), m_(build_dir(root) + "/krea.metallib") {
     const std::string e = root + "/weights/engine/";
+    mem_report(m_, "start");
     vae_ = std::make_unique<VAEDecoder>(m_, e + "vae.qw");
     tf_ = std::make_unique<TextFusion>(m_, e + "txt.qw");
     cond_ = std::make_unique<Conditioning>(m_, e + "cond.qw");
     load_latent_rgb();
+    mem_report(m_, "vae + text fusion + cond");
     // Default to the GPU+ANE hybrid when its weights exist; otherwise GPU-only.
     load_dit(false, ane_available(false) && !getenv("KREA_GPU_ONLY"));
+    mem_report(m_, "DiT + ANE programs loaded");
     kv_build_ = fnv_files({build_dir(root) + "/krea.metallib", self_path()}, true) ^
                 fnv_files({e + "te.qw", e + "txt.qw"}, false);
-    dit_->weights().prefetch();
-    dit_->weights().make_resident(m_);
+    if (!getenv("KREA_DIT_LAYERS")) {  // (debug runs of a few layers wire only the layers they use)
+      dit_->weights().prefetch();
+      dit_->weights().make_resident(m_);
+    }
+    mem_report(m_, "DiT weights resident");
   }
 
   bool ane_available(bool fast = false) const { return !split_path(fast).empty(); }
@@ -130,6 +217,7 @@ class Engine {
     if (cfg) ntxt = text_features(neg, &Tn, nullptr);
     s.encode_ms = now_ms() - t1;
     vlog("text features");
+    mem_report(m_, "after text path");
     s.text_tokens = T;
     s.cached_prompt = hit;
     if (report("encode", 1, 1)) return 1;
@@ -147,10 +235,38 @@ class Engine {
     }
 
     vlog("conditioning");
-    // ---- 3. denoising loop ----
-    Tensor z = m_.alloc((size_t)M * kLatC * 4), vel = m_.alloc((size_t)M * kLatC * 4), vel2;
-    if (cfg) vel2 = m_.alloc((size_t)M * kLatC * 4);
-    gaussian_noise(p.seed, z.ptr<float>(), (size_t)M * kLatC);
+    // ---- 3. denoising loop (editing: from the encoded source, noised to sigma[k0]) ----
+    const size_t NL = (size_t)M * kLatC;
+    Tensor z = m_.alloc(NL * 4), vel = m_.alloc(NL * 4), vel2;
+    if (cfg) vel2 = m_.alloc(NL * 4);
+    gaussian_noise(p.seed, z.ptr<float>(), NL);
+    const bool edit = p.init_rgba != nullptr;
+    const int k0 = edit ? std::clamp(p.start_step, 0, n_steps - 1) : 0, total = n_steps - k0;
+    Tensor x0, eps, mlat;
+    std::vector<float> alpha;  // feathered pixel mask for the final composite (empty: whole image)
+    if (edit) {
+      t1 = now_ms();
+      if (report("encode", 0, 1)) return 1;
+      x0 = m_.alloc(NL * 4);
+      vae_->weights().prefetch();
+      vae_->encode(p.init_rgba, p.height, p.width, x0);
+      eps = m_.alloc(NL * 4);
+      memcpy(eps.ptr<void>(), z.ptr<void>(), NL * 4);
+      const float sg = sig[k0];
+      const float* xs = x0.ptr<float>();
+      const float* es = eps.ptr<float>();
+      float* zs0 = z.ptr<float>();
+      for (size_t i = 0; i < NL; i++) zs0[i] = (1.0f - sg) * xs[i] + sg * es[i];
+      if (p.mask) {
+        std::vector<float> mp;
+        if (edit_masks(p.mask, p.width, p.height, mp, alpha)) {
+          mlat = m_.alloc(NL * 4);
+          memcpy(mlat.ptr<void>(), mp.data(), NL * 4);
+        }
+      }
+      s.encode_ms += now_ms() - t1;
+      vlog("source encoded");
+    }
     const bool fastpv = p.preview != 0;
     const int hq_every = std::max(0, p.hq_preview_every);
     std::vector<float> zs, vs;
@@ -167,14 +283,14 @@ class Engine {
       phq.resize((size_t)M * 256 * 4);
     }
     int pending = -1;
-    auto emit = [&](int done) {
+    auto emit = [&](int done) {  // done: absolute step index; reported relative to the first step run
       project_preview(zs.data(), vs.data(), sig[done], H16, W16, px0.data(), pnz.data());
-      const krea_preview pv{2 * W16, 2 * H16, 3, done, 0, px0.data(), pnz.data()};
-      return report("denoise", done, n_steps, &pv);
+      const krea_preview pv{2 * W16, 2 * H16, 3, done - k0, 0, px0.data(), pnz.data()};
+      return report("denoise", done - k0, total, &pv);
     };
-    int cancel = report("denoise", 0, n_steps);
+    int cancel = report("denoise", 0, total);
     t1 = now_ms();
-    for (int i = 0; i < n_steps && !cancel; i++) {
+    for (int i = k0; i < n_steps && !cancel; i++) {
       m_.begin();
       if (cfg) {  // the text length differs between the two passes: RoPE tables per pass
         dit_->set_grid(Tn, H16, W16);
@@ -190,13 +306,18 @@ class Engine {
                             &cp, sizeof(cp), 2);
       }
       m_.euler_step(z, vel, M * kLatC, sig[i + 1] - sig[i]);
+      if (mlat) {  // outside the mask: back to the source at the new noise level
+        struct { uint32_t n; float keep, noise; } bp{(uint32_t)NL, 1.0f - sig[i + 1], sig[i + 1]};
+        m_.dispatch_threads("latent_blend", MTLSizeMake(NL, 1, 1), MTLSizeMake(256, 1, 1), {z, x0, eps, mlat}, &bp,
+                            sizeof(bp), 4);
+      }
       m_.commit();
       // GPU is now running step i; report step i-1 (with its preview) meanwhile.
       if (pending >= 0) {
         cancel = emit(pending);
         pending = -1;
-      } else if (i > 0) {
-        cancel = report("denoise", i, n_steps);
+      } else if (i > k0) {
+        cancel = report("denoise", i - k0, total);
       }
       m_.wait();
       if (verbose) {
@@ -204,25 +325,26 @@ class Engine {
         snprintf(b, sizeof(b), "step %d done", i + 1);
         vlog(b);
       }
+      if (i == k0) mem_report(m_, "after the first step");
       if (fastpv) {
         memcpy(zs.data(), z.ptr<float>(), zs.size() * 4);
         memcpy(vs.data(), vel.ptr<float>(), vs.size() * 4);
         pending = i + 1;
       }
-      if (hq_every && (i + 1) % hq_every == 0 && i + 1 < n_steps && !cancel) {
+      if (hq_every && (i + 1 - k0) % hq_every == 0 && i + 1 < n_steps && !cancel) {
         const float* zp = z.ptr<float>();
         const float* vp = vel.ptr<float>();
         float* xp = hqz.ptr<float>();
         for (size_t k = 0; k < (size_t)M * kLatC; k++) xp[k] = zp[k] - sig[i + 1] * vp[k];
         vae_->decode(hqz, H16, W16, phq.data());
-        const krea_preview pv{16 * W16, 16 * H16, 4, i + 1, 1, phq.data(), nullptr};
-        cancel = report("denoise", i + 1, n_steps, &pv);
+        const krea_preview pv{16 * W16, 16 * H16, 4, i + 1 - k0, 1, phq.data(), nullptr};
+        cancel = report("denoise", i + 1 - k0, total, &pv);
       }
     }
-    if (!cancel) cancel = pending >= 0 ? emit(pending) : report("denoise", n_steps, n_steps);
+    if (!cancel) cancel = pending >= 0 ? emit(pending) : report("denoise", total, total);
     if (cancel) return 1;
     s.denoise_ms = now_ms() - t1;
-    s.step_ms = s.denoise_ms / n_steps;
+    s.step_ms = s.denoise_ms / total;
     if (const char* tr = getenv("KREA_TRACE")) Metal::write_trace(m_.take_profile(), tr);  // with KREA_PROFILE=1
     if (p.latent_out) memcpy(p.latent_out, z.ptr<float>(), (size_t)M * kLatC * 4);
 
@@ -231,7 +353,16 @@ class Engine {
     if (report("decode", 0, 1)) return 1;
     vae_->weights().prefetch();
     vae_->decode(z, H16, W16, out);
+    if (!alpha.empty()) {  // keep the source exactly outside the (feathered) mask
+      const size_t P = (size_t)p.width * p.height;
+      for (size_t i = 0; i < P; i++) {
+        const float a = alpha[i];
+        for (int c = 0; c < 3; c++)
+          out[i * 4 + c] = (uint8_t)std::lround(a * out[i * 4 + c] + (1.0f - a) * p.init_rgba[i * 4 + c]);
+      }
+    }
     s.decode_ms = now_ms() - t1;
+    mem_report(m_, "after VAE decode");
     s.total_ms = now_ms() - t0;
     report("done", 1, 1);
     if (st) *st = s;

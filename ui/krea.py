@@ -40,7 +40,8 @@ class Params(ctypes.Structure):
     _fields_ = [("width", ctypes.c_int), ("height", ctypes.c_int), ("steps", ctypes.c_int),
                 ("seed", ctypes.c_uint64), ("cfg_scale", ctypes.c_float), ("ane", ctypes.c_int),
                 ("preview", ctypes.c_int), ("hq_preview_every", ctypes.c_int), ("latent_out", ctypes.c_void_p),
-                ("fast", ctypes.c_int)]
+                ("fast", ctypes.c_int), ("init_rgba", ctypes.c_void_p), ("mask", ctypes.c_void_p),
+                ("start_step", ctypes.c_int)]
 
 
 class Stats(ctypes.Structure):
@@ -107,15 +108,31 @@ class Engine:
         return "cached" if rc == 1 else "prepared"
 
     def generate(self, prompt, width=1024, height=1024, steps=8, seed=0, fast=False, cfg_scale=0.0, negative_prompt="",
-                 ane=True, progress=None, preview=False, hq_preview_every=0, return_latent=False):
+                 ane=True, progress=None, preview=False, hq_preview_every=0, return_latent=False,
+                 init_image=None, mask=None, start_step=0):
         """Returns (PIL.Image RGB, stats dict). progress(stage, step, total, elapsed_ms, preview) -> truthy
         cancels; preview is None or a dict {width, height, channels, step, hq, x0: bytes, noisy: bytes|None}.
-        With return_latent, stats["latent"] holds the final packed latent (float32 bytes [H/16 * W/16, 64])."""
+        With return_latent, stats["latent"] holds the final packed latent (float32 bytes [H/16 * W/16, 64]).
+
+        Editing: init_image (PIL) is the source, resized to width x height; start_step (1 .. steps-1) is the first
+        denoising step run, so a later start keeps more of the source; mask (PIL, white = regenerate, same size)
+        limits the change to a region and keeps the source pixels elsewhere. Progress then counts the steps run."""
         from PIL import Image
 
         ids = self.tokenize(prompt)
         neg = self.tokenize(negative_prompt) if cfg_scale > 0 else []
         w, h = width // 16 * 16, height // 16 * 16
+        init_buf = mask_buf = None
+        if init_image is not None:
+            src = init_image.convert("RGB")
+            if src.size != (w, h):
+                src = src.resize((w, h), Image.LANCZOS)
+            init_buf = ctypes.create_string_buffer(src.convert("RGBA").tobytes(), w * h * 4)
+            if mask is not None:
+                mk = mask.convert("L")
+                if mk.size != (w, h):
+                    mk = mk.resize((w, h), Image.BILINEAR)
+                mask_buf = ctypes.create_string_buffer(mk.tobytes(), w * h)
         out = ctypes.create_string_buffer(w * h * 4)
         st = Stats()
         err = ctypes.create_string_buffer(1024)
@@ -142,7 +159,9 @@ class Engine:
         steps = 4 if fast else steps
         p = Params(w, h, steps, seed & (2**64 - 1), cfg_scale, 1 if ane else 0, 1 if preview else 0,
                    max(0, int(hq_preview_every)), ctypes.cast(lat, ctypes.c_void_p) if lat is not None else None,
-                   1 if fast else 0)
+                   1 if fast else 0, ctypes.cast(init_buf, ctypes.c_void_p) if init_buf is not None else None,
+                   ctypes.cast(mask_buf, ctypes.c_void_p) if mask_buf is not None else None,
+                   int(start_step) if init_buf is not None else 0)
         ia = (ctypes.c_int * len(ids))(*ids)
         na = (ctypes.c_int * max(1, len(neg)))(*neg) if neg else None
         with self.lock:
@@ -155,6 +174,8 @@ class Engine:
         img = Image.frombuffer("RGBA", (w, h), out.raw, "raw", "RGBA", 0, 1).convert("RGB")
         stats = {k: getattr(st, k) for k, _ in Stats._fields_}
         stats.update(width=w, height=h, steps=steps, seed=seed, fast=bool(fast), cfg_scale=cfg_scale)
+        if init_buf is not None:
+            stats.update(start_step=int(start_step), masked=mask_buf is not None)
         if lat is not None:
             stats["latent"] = bytes(lat)
         return img, stats

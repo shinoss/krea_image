@@ -162,12 +162,16 @@ class DiT {
 };
 
 // ------------------------------------------------------------------------------------------
-// Qwen-Image VAE decoder (Wan 2.1 architecture, single frame): 16-channel latents, 8x upsampling.
+// Qwen-Image VAE (Wan 2.1 architecture, single frame): 16-channel latents, 8x up/downsampling. The decoder
+// renders every image; the encoder turns an existing image into a latent for editing.
 class VAEDecoder {
  public:
   VAEDecoder(Metal& m, const std::string& path);
   // z: f32 [H16 * W16, 64] packed DiT latent (token-major). Writes RGBA8 [16*H16 x 16*W16 x 4] to out.
   void decode(const Tensor& z, int H16, int W16, uint8_t* out_rgba);
+  // RGBA8 [H x W x 4] (H, W multiples of 16) -> normalized packed latent f32 [H/16 * W/16, 64] in z (the
+  // encoder's mean). Encodes, commits and waits.
+  void encode(const uint8_t* rgba, int H, int W, const Tensor& z);
   double gpu_ms() const { return gpu_ms_; }
   WeightFile& weights() { return w_; }
 
@@ -175,6 +179,7 @@ class VAEDecoder {
   double gpu_ms_ = 0;
   double gpu_end_ = 0;
   void run(const Tensor& z, int H16, int W16, uint8_t* out_rgba);
+  void run_encode(const uint8_t* rgba, int H, int W, const Tensor& z);
   struct Act {
     Tensor t;
     int H, W, C;
@@ -183,6 +188,7 @@ class VAEDecoder {
   Act conv1x1(const Act& x, const std::string& name, int cout);
   void conv(int mode, const Act& x, const Tensor& w, const Tensor& b, const Tensor* res, const Tensor& y, int cout);
   Act upsample(const Act& x, const std::string& name, int cout);
+  Act downsample(const Act& x, const std::string& name, int cout);
   Act norm_silu(const Act& x, const std::string& gamma, bool silu);
   Act conv3x3_wino(const Act& x, const std::string& name, int cout, const Tensor* residual);
   bool wino(const Act& x, int cout) const;

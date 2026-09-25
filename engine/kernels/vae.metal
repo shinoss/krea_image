@@ -173,7 +173,7 @@ kernel void vae_subpix_weights(device const bf16* Wt [[buffer(0)]],
 //           phase and scatters its rows into the 2H x 2W output. has_res fuses the DupUp3D shortcut
 //           out[2i + py, 2j + px, co] += res[i, j, (((co*ft + ft-1)*2 + py)*2 + px) / repeats].
 struct VConvParams {
-  int H, W;  // input spatial size (MODE 2: low-res; the output is 2H x 2W)
+  int H, W;  // input spatial size (MODE 2: low-res, the output is 2H x 2W; MODE 4: output size, input 2H x 2W)
   int Cin, Cout;
   int has_res, Cres, ft, repeats;
 };
@@ -192,7 +192,7 @@ template <int MODE, int BN>
                                                               ushort tid [[thread_index_in_threadgroup]]) {
   constexpr int BM = 64, BK = 16, WM = 2, WN = 2, SWZ = 8;
   constexpr int TM = BM / (8 * WM), TN = BN / (8 * WN);
-  constexpr int TAPS = MODE == 3 ? 9 : MODE == 2 ? 4 : 1;
+  constexpr int TAPS = MODE == 3 || MODE == 4 ? 9 : MODE == 2 ? 4 : 1;
   constexpr int B_CHUNKS = BK * BN / 8;
   threadgroup bf16 As[2][BM * BK];
   threadgroup bf16 Bs[2][BK * BN];
@@ -227,16 +227,21 @@ template <int MODE, int BN>
   device const bf16* a_src = in + (size_t)pix * p.Cin + a_c;
 #define SET_TAP()                                                              \
   {                                                                            \
-    int sy = y, sx = x;                                                        \
+    int sy = y, sx = x, IH = p.H, IW = p.W;                                    \
     if (MODE == 3) {                                                           \
       sy += tap / 3 - 1;                                                       \
       sx += tap % 3 - 1;                                                       \
     } else if (MODE == 2) {                                                    \
       sy += py - 1 + (tap >> 1);                                               \
       sx += px - 1 + (tap & 1);                                                \
+    } else if (MODE == 4) {                                                    \
+      sy = 2 * y + tap / 3;                                                    \
+      sx = 2 * x + tap % 3;                                                    \
+      IH = 2 * p.H;                                                            \
+      IW = 2 * p.W;                                                            \
     }                                                                          \
-    a_ok = sy >= 0 && sy < p.H && sx >= 0 && sx < p.W;                         \
-    a_src = in + (size_t)(a_ok ? sy * p.W + sx : 0) * p.Cin + a_c;             \
+    a_ok = sy >= 0 && sy < IH && sx >= 0 && sx < IW;                           \
+    a_src = in + (size_t)(a_ok ? sy * IW + sx : 0) * p.Cin + a_c;              \
   }
   if (MODE != 1) SET_TAP();
 
@@ -340,6 +345,9 @@ INST_VCONV("vconv1x1_bn64", 1, 64)
 INST_VCONV("vconv1x1_bn48", 1, 48)
 INST_VCONV("vconv_up2_bn64", 2, 64)
 INST_VCONV("vconv_up2_bn48", 2, 48)
+// MODE 4: the encoder's downsampler, ZeroPad2d((0, 1, 0, 1)) + 3x3 conv with stride 2 (no top / left padding)
+INST_VCONV("vconv_dn2_bn64", 4, 64)
+INST_VCONV("vconv_dn2_bn48", 4, 48)
 
 // ---------------------------------------------------------------------------------------
 // Winograd F(2x2, 3x3) for the resblock 3x3 convs: out = A^T [(G g G^T) . (B^T d B)] A per 2x2
@@ -779,3 +787,40 @@ kernel void vae_conv_out_rgba(device const bf16* in [[buffer(0)]],
 
 // Touch a scratch buffer (VAEDecoder::prewire): makes the driver map it ahead of its first use.
 kernel void vae_touch(device uint* p [[buffer(0)]], uint gid [[thread_position_in_grid]]) { p[gid] = 0; }
+
+// ---------------------------------------------------------------------------------------
+// Encoder input: RGBA8 pixels -> bf16 [P, 16] in [-1, 1] (channels 3..15 zero: conv_in's weights are padded to
+// 16 input channels, the conv kernel's K step).
+kernel void vae_in_rgba(device const uchar4* src [[buffer(0)]],
+                        device bf16* x [[buffer(1)]],
+                        constant int& P [[buffer(2)]],
+                        uint pix [[thread_position_in_grid]]) {
+  if ((int)pix >= P) return;
+  const float4 c = float4(src[pix]) * (1.0f / 127.5f) - 1.0f;
+  device vec<bf16, 8>* o = (device vec<bf16, 8>*)(x + (size_t)pix * 16);
+  o[0] = vec<bf16, 8>(bf16(c.x), bf16(c.y), bf16(c.z), 0, 0, 0, 0, 0);
+  o[1] = vec<bf16, 8>(0);
+}
+
+// Encoder output: conv_out's 32 channels (of 48, padded) per latent pixel -> quant_conv (1x1, only the 16 mean
+// channels are needed) -> normalize ((mu - mean) / std) -> packed DiT tokens f32 [H16 * W16, 64] in
+// (c, py, px) order. The inverse of vae_unpack_pq.
+kernel void vae_pack_q(device const bf16* h [[buffer(0)]],
+                       device const float* w [[buffer(1)]],
+                       device const float* b [[buffer(2)]],
+                       device const float* mean [[buffer(3)]],
+                       device const float* stdv [[buffer(4)]],
+                       device float* z [[buffer(5)]],
+                       constant int& W16 [[buffer(6)]],
+                       uint pix [[thread_position_in_grid]]) {
+  const int W8 = 2 * W16, yy = pix / W8, xx = pix % W8;
+  device const bf16* hi = h + (size_t)pix * 48;
+  float u[32];
+  for (int c = 0; c < 32; c++) u[c] = float(hi[c]);
+  device float* zt = z + (size_t)((yy >> 1) * W16 + (xx >> 1)) * 64 + (yy & 1) * 2 + (xx & 1);
+  for (int o = 0; o < 16; o++) {
+    float acc = b[o];
+    for (int c = 0; c < 32; c++) acc += w[c * 32 + o] * u[c];
+    zt[o * 4] = (acc - mean[o]) / stdv[o];
+  }
+}

@@ -34,6 +34,14 @@ typedef struct {
   int hq_preview_every;/* N > 0: also VAE-decode the predicted image every N steps (costs GPU time) */
   float* latent_out;   /* optional: receives the final packed latent, [H/16 * W/16, 64] f32 */
   int fast;            /* 1: 4-step distillation LoRA (merged weights); use steps = 4 */
+  /* Editing (image-to-image / inpainting; Krea 2 has no instruction-editing mode). init_rgba: the source image,
+     width*height*4 bytes (NULL = text-to-image). It is VAE-encoded and noised to sigma[start_step] (1 ..
+     steps-1: a later start keeps more of it; 0 = start from pure noise), then denoised from there. mask:
+     width*height bytes, >= 128 = regenerate, NULL (or empty) = the whole image. Outside the mask the source
+     latent is re-imposed after every step and the source pixels are composited back with a feathered seam. */
+  const uint8_t* init_rgba;
+  const uint8_t* mask;
+  int start_step;
 } krea_params;
 
 typedef struct {

@@ -1,4 +1,4 @@
-// Qwen-Image VAE decoder (the Wan 2.1 decoder, single frame), as used by Krea 2:
+// Qwen-Image VAE (the Wan 2.1 VAE, single frame), as used by Krea 2. Decoder:
 //   unpack + de-normalize + post_quant_conv -> conv_in 16->384 -> mid (res, attention, res) ->
 //   up0: 3 res @384, up 384->192 | up1: res 192->384, 2 res @384, up 384->192 | up2: 3 res @192, up 192->96
 //   | up3: 3 res @96 -> RMS norm + SiLU -> conv_out 96->3 (+ alpha 1) -> RGBA8.
@@ -108,15 +108,18 @@ void VAEDecoder::retire() {
 }
 
 // Implicit-GEMM conv (kernels/vae.metal vconv): mode 1 = 1x1, 3 = 3x3, 2 = nearest-2x + 3x3 as four 2x2
-// sub-pixel convs (weights from vae_subpix_weights).
+// sub-pixel convs (weights from vae_subpix_weights), 4 = the encoder's stride-2 3x3 (padding right / bottom
+// only; the output is x.H/2 x x.W/2).
 void VAEDecoder::conv(int mode, const Act& x, const Tensor& w, const Tensor& b, const Tensor* res, const Tensor& y,
                       int cout) {
   const int bn = cout % 64 == 0 ? 64 : 48;
   if (cout % bn || x.C % 16) throw std::runtime_error("conv: unsupported channels");
+  if (mode == 4 && (x.H % 2 || x.W % 2)) throw std::runtime_error("conv: stride-2 needs even sizes");
   const int N = mode == 2 ? 4 * cout : cout;
-  const MTLSize grid = MTLSizeMake(N / bn, (x.H * x.W + 63) / 64, 1);
-  const char* kind = mode == 3 ? "3x3" : mode == 1 ? "1x1" : "_up2";
-  VConvParams p{x.H, x.W, x.C, cout, res ? 1 : 0, 0, 0, 1};
+  const int H = mode == 4 ? x.H / 2 : x.H, W = mode == 4 ? x.W / 2 : x.W;
+  const MTLSize grid = MTLSizeMake(N / bn, (H * W + 63) / 64, 1);
+  const char* kind = mode == 3 ? "3x3" : mode == 1 ? "1x1" : mode == 2 ? "_up2" : "_dn2";
+  VConvParams p{H, W, x.C, cout, res ? 1 : 0, 0, 0, 1};
   m_.dispatch(std::string("vconv") + kind + "_bn" + std::to_string(bn), grid, MTLSizeMake(128, 1, 1),
               {x.t, w, b, res ? *res : y, y}, &p, sizeof(p), 5);
 }
@@ -145,6 +148,14 @@ VAEDecoder::Act VAEDecoder::upsample(const Act& x, const std::string& name, int 
   conv(2, x, w2, w_.get(name + ".bias"), nullptr, y.t, cout);
   op_done("up2 subpixel", y);
   release(w2);
+  return y;
+}
+
+// Encoder downsampler: ZeroPad2d((0, 1, 0, 1)) + 3x3 conv, stride 2 (x.C -> cout).
+VAEDecoder::Act VAEDecoder::downsample(const Act& x, const std::string& name, int cout) {
+  Act y{scratch((size_t)(x.H / 2) * (x.W / 2) * cout * BF), x.H / 2, x.W / 2, cout};
+  conv(4, x, w_.get(name + ".weight"), w_.get(name + ".bias"), nullptr, y.t, cout);
+  op_done("down2", y);
   return y;
 }
 
@@ -273,6 +284,75 @@ void VAEDecoder::decode(const Tensor& z, int H16, int W16, uint8_t* out_rgba) {
     trim();
     throw;
   }
+}
+
+void VAEDecoder::encode(const uint8_t* rgba, int H, int W, const Tensor& z) {
+  gpu_ms_ = gpu_end_ = 0;
+  const int saved = wino_;
+  wino_ = 0;  // direct convs: the Winograd range check above covers only the decoder's norm gammas
+  try {
+    run_encode(rgba, H, W, z);
+    wino_ = saved;
+  } catch (...) {
+    wino_ = saved;
+    try {
+      m_.end_wait();
+    } catch (...) {
+    }
+    if (inflight_) [inflight_ waitUntilCompleted];
+    inflight_ = nil;
+    trim();
+    throw;
+  }
+}
+
+// Encoder (single frame): RGBA -> conv_in 3->96 -> 2 res @96, down | res 96->192, res, down | res 192->384, res,
+// down | 2 res @384 -> mid (res, attention, res) -> RMS norm + SiLU -> conv_out 384->32 -> quant_conv, keep the
+// 16 mean channels -> normalize -> packed tokens. The deterministic encoding (distribution mean), as the
+// image-to-image pipelines use.
+void VAEDecoder::run_encode(const uint8_t* rgba, int H, int W, const Tensor& z) {
+  if (H % 16 || W % 16) throw std::runtime_error("encode: the image size must be a multiple of 16");
+  const int P = H * W;
+  trim();
+  m_.begin();
+  Tensor src = scratch((size_t)P * 4);
+  memcpy(src.ptr<void>(), rgba, (size_t)P * 4);
+  Act x{scratch((size_t)P * 16 * BF), H, W, 16};
+  m_.dispatch_threads("vae_in_rgba", MTLSizeMake((size_t)P, 1, 1), MTLSizeMake(256, 1, 1), {src, x.t}, &P, sizeof(P), 2);
+  op_done("in", x);
+  release(src);
+  auto next = [&](const Act& y) {
+    release(x.t);
+    x = y;
+  };
+  const std::string e = "encoder.";
+  next(conv3x3(x, e + "conv_in", 96, nullptr));
+  next(resblock(x, e + "down_blocks.0.", 96));
+  next(resblock(x, e + "down_blocks.1.", 96));
+  next(downsample(x, e + "down_blocks.2.resample.1", 96));
+  next(resblock(x, e + "down_blocks.3.", 192));
+  next(resblock(x, e + "down_blocks.4.", 192));
+  next(downsample(x, e + "down_blocks.5.resample.1", 192));
+  next(resblock(x, e + "down_blocks.6.", 384));
+  next(resblock(x, e + "down_blocks.7.", 384));
+  next(downsample(x, e + "down_blocks.8.resample.1", 384));
+  next(resblock(x, e + "down_blocks.9.", 384));
+  next(resblock(x, e + "down_blocks.10.", 384));
+  next(resblock(x, e + "mid_block.resnets.0.", 384));
+  next(attention(x, e + "mid_block.attentions.0."));
+  next(resblock(x, e + "mid_block.resnets.1.", 384));
+  next(norm_silu(x, e + "norm_out.gamma", true));
+  next(conv3x3(x, e + "conv_out", 48, nullptr));  // 32 channels (padded to 48)
+  const int W16 = W / 16;
+  m_.dispatch_threads("vae_pack_q", MTLSizeMake((size_t)x.H * x.W, 1, 1), MTLSizeMake(256, 1, 1),
+                      {x.t, w_.get("quant_conv.weight"), w_.get("quant_conv.bias"), w_.get("latents_mean"),
+                       w_.get("latents_std"), z},
+                      &W16, sizeof(W16), 6);
+  id<MTLCommandBuffer> last = m_.command_buffer();
+  m_.end_wait();
+  retire();
+  add_busy(last, gpu_ms_, gpu_end_);
+  trim();
 }
 
 void VAEDecoder::run(const Tensor& z, int H16, int W16, uint8_t* out_rgba) {

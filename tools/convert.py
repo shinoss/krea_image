@@ -6,7 +6,7 @@
   dit_fast.qw  the same with the 4-step LoRA merged (W + B A in fp32, rounded once)
   cond.qw      f32 tmlp / tproj (for custom schedules, CPU only) + t(sigma), tvec(sigma) of the preset
                schedules (8 steps; 4 steps with the LoRA)
-  vae.qw       Qwen-Image VAE decoder (bf16 convs, f32 norms / biases)
+  vae.qw       Qwen-Image VAE decoder + encoder (bf16 convs, f32 norms / biases)
 
 Format: "QWTS" | u32 version | u64 header_len | JSON header | zero pad | tensor data. Tensors are 16 KiB
 aligned (the page size), grouped by name prefix (the engine wraps each prefix group, e.g. one DiT layer
@@ -345,13 +345,17 @@ def conv_w(t):
 
 
 def convert_vae():
+    """Qwen-Image (Wan 2.1) VAE, single frame: decoder (+ post_quant_conv) for generation, encoder (+ quant_conv)
+    for editing. Causal 3-D convs keep their last temporal tap; the downsamplers' / upsamplers' time_conv only
+    runs from the second frame on and is dropped."""
     f = safe_open(os.path.join(VAE_DIR, "diffusion_pytorch_model.safetensors"), "pt")
     cfg = json.load(open(os.path.join(VAE_DIR, "config.json")))
-    keys = sorted(k for k in f.keys() if (k.startswith("decoder.") or k.startswith("post_quant_conv.")) and "time_conv" not in k)
+    parts = ("decoder.", "post_quant_conv.", "encoder.", "quant_conv.")
+    keys = sorted(k for k in f.keys() if k.startswith(parts) and "time_conv" not in k)
     tensors = []
     for k in keys:
         t = f.get_tensor(k).float()
-        if k == "post_quant_conv.weight":
+        if k in ("post_quant_conv.weight", "quant_conv.weight"):
             tensors.append((k, "f32", t[:, :, 0, 0, 0].t().contiguous()))  # [in, out]
         elif k == "decoder.conv_out.weight":  # 3 -> 4 output channels (alpha = bias 1)
             w4 = torch.zeros(4, *t.shape[1:])
@@ -359,6 +363,16 @@ def convert_vae():
             tensors.append((k, "bf16", conv_w(w4)))
         elif k == "decoder.conv_out.bias":
             tensors.append((k, "f32", torch.cat([t, torch.ones(1)])))
+        elif k == "encoder.conv_in.weight":  # RGB input padded to 16 channels (the conv kernel's K step)
+            w16 = torch.zeros(t.shape[0], 16, *t.shape[2:])
+            w16[:, :3] = t
+            tensors.append((k, "bf16", conv_w(w16)))
+        elif k == "encoder.conv_out.weight":  # 32 -> 48 output channels (the conv kernel's N tile)
+            w48 = torch.zeros(48, *t.shape[1:])
+            w48[:32] = t
+            tensors.append((k, "bf16", conv_w(w48)))
+        elif k == "encoder.conv_out.bias":
+            tensors.append((k, "f32", torch.cat([t, torch.zeros(16)])))
         elif k.endswith(".weight") and t.dim() >= 4:
             tensors.append((k, "bf16", conv_w(t)))
         elif k.endswith(".gamma"):
@@ -367,10 +381,10 @@ def convert_vae():
             tensors.append((k, "f32", t))
     tensors.append(("latents_mean", "f32", torch.tensor(cfg["latents_mean"])))
     tensors.append(("latents_std", "f32", torch.tensor(cfg["latents_std"])))
-    # group by segment prefix (up to the first '.'): "decoder", "post_quant_conv", "latents_mean", ...
+    # group by segment prefix (up to the first '.'): "decoder", "encoder", "post_quant_conv", ...
     tensors.sort(key=lambda x: x[0].split(".")[0])
     w = StreamWriter(os.path.join(DST, "vae.qw"), [(n, d, tuple(t.shape)) for n, d, t in tensors],
-                     {"model": "qwen-image-vae-decoder (wan2.1)"})
+                     {"model": "qwen-image-vae (wan2.1): decoder + encoder"})
     for n, d, t in tensors:
         w.write(n, t)
     w.close()

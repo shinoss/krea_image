@@ -1,0 +1,10 @@
+# Python 3.12. Runtime (web UI / app server, CLI): tokenizers, pillow, numpy.
+# Setup (weight conversion, Neural Engine programs, downloads): torch, safetensors, coremltools, requests, huggingface-hub.
+torch==2.14.0
+numpy==2.5.3
+safetensors==0.8.0
+tokenizers==0.23.2
+pillow==12.3.0
+coremltools==9.0
+requests==2.34.2
+huggingface-hub==1.32.0

@@ -69,6 +69,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .secondary { padding: 12px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--bg); color: var(--ink);
   font: inherit; cursor: pointer; }
 .hint { color: var(--muted); font-size: 12px; }
+.hint.subtle { font-size: 11.5px; opacity: .75; }
 .prep { opacity: 0; visibility: hidden; transition: opacity .3s, visibility .3s; }
 .prep.show { opacity: 1; visibility: visible; }
 details summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -180,6 +181,7 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
         <input type="range" id="brush" min="8" max="320" step="4">
         <div class="hint">Nothing painted: the whole image changes. Painted: only that area changes and the rest keeps its original pixels.</div>
       </div>
+      <div class="hint subtle">Edits change what's already in the image; adding new objects usually doesn't work.</div>
     </div>
 
     <div>
@@ -561,7 +563,7 @@ function renderAmount() {
   a.max = maskDirty ? n : n - 1;  // starting from pure noise only makes sense inside a painted area
   a.value = Math.min(Math.max(+a.value || 1, 1), +a.max);
   const k = startStep(), sg = sigmas(n)[k];
-  const [label, hint] = sg >= 0.999 ? ["Replace", "New content in the painted area, blended into its surroundings."]
+  const [label, hint] = sg >= 0.999 ? ["Replace", "Repaints the painted area from scratch, blended into its surroundings."]
     : sg < 0.4 ? ["Touch-up", "Refines details and texture; composition and colors stay."]
     : sg < 0.6 ? ["Light", "Keeps the composition and colors; changes details."]
     : sg < 0.8 ? ["Medium", "Keeps the layout; can change style, lighting and content."]

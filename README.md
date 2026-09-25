@@ -71,6 +71,8 @@ Krea 2 has no instruction-based editing mode (it was released as a text-to-image
 re-imagining the image with your prompt, which is the image-to-image and inpainting approach every diffusion model
 supports.
 
+<sub>Edits change what's already in the image; adding new objects usually doesn't work.</sub>
+
 ### Watch it paint
 A live preview updates after every step, with a full-quality decode halfway through, so you can cancel early if the
 composition isn't what you wanted.
@@ -144,7 +146,7 @@ a pixel-identical image.
 
 ### Build from source
 ```bash
-git clone <repository-url> krea_metal && cd krea_metal
+git clone https://github.com/shinoss/krea_image && cd krea_image
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
@@ -264,5 +266,6 @@ run.sh      setup and launcher
   for the packaged checkpoint and tokenizer files.
 
 ## License
-The model weights are licensed separately under the Krea 2 Community License; see the
-[model page](https://huggingface.co/krea/Krea-2-Turbo). No license has been chosen for this repository's code yet.
+Licensed under the **Krea 2 Community License Agreement**, the same license as Krea 2 Turbo; see
+[LICENSE.md](LICENSE.md). Use of the model is also subject to Krea's
+[Acceptable Use Policy](https://www.krea.ai/krea-2-use-policy).

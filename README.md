@@ -111,7 +111,7 @@ with Low Power Mode off. Timings vary by about ±10% between sessions.
 | 512×512, Quality | 20–23 s per image |
 | Engine start | ~20 s. The first launch takes 1.5–2.5 min while macOS compiles the Neural Engine programs, then they're cached |
 | Switching presets | ~20 s (cached programs) |
-| Memory while loaded | ~18 GB locked, peaking at ~25 GB during load |
+| Memory while loaded | ~17 GB locked (~21.5 GB at the peak, while loading), plus ~2 GB other |
 
 **Accuracy.** Every stage was checked against an fp32 PyTorch implementation of the official Krea 2 code:
 
@@ -134,8 +134,8 @@ a pixel-identical image.
 ## Install
 
 ### Requirements
-- An Apple silicon Mac with **36 GB of unified memory or more**. Development and testing were done on an M3 Pro with
-  36 GB; other chips are untested.
+- An Apple silicon Mac with **36 GB of unified memory or more** (32 GB may work; see below). Development and
+  testing were done on an M3 Pro with 36 GB; other chips are untested.
 - **macOS 14** or later.
 - **Xcode** (the full app, for the Metal shader compiler), Python 3.12 and [uv](https://github.com/astral-sh/uv).
 - **~40 GB of disk** for the converted weights (both presets), plus ~35 GB during setup for the original checkpoints,
@@ -143,6 +143,18 @@ a pixel-identical image.
 - A Hugging Face account. Krea 2's weights are released under the **Krea 2 Community License**: read and accept it on
   the [model page](https://huggingface.co/krea/Krea-2-Turbo) before downloading. This project doesn't redistribute
   any weights.
+
+### How much memory do I need?
+The engine keeps about 17 GB of model weights locked in memory while it generates (about 21.5 GB at the peak, while
+loading), plus about 2 GB for everything else. macOS lets apps lock only part of the RAM: about 79%, or 30.5 GB on a
+36 GB Mac.
+
+| Unified memory | |
+|---|---|
+| 48 GB or more | Comfortable, even with other apps open |
+| 36 GB | Works (tested on an M3 Pro); keep other heavy apps closed |
+| 32 GB | Should work with other apps closed, with heavy swapping (untested estimate) |
+| 24 GB or less | Not supported: the engine needs more locked memory than macOS allows, so the app declines to load instead of risking a crash |
 
 ### Build from source
 ```bash

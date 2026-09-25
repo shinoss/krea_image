@@ -381,8 +381,12 @@ final class ServerController: ObservableObject {
             self.phase = .failed(s.error.map { "The engine failed to load: \($0)" } ?? "The engine failed to load.")
             return
           default:
-            self.phase = .loading
-            self.detail = self.lastLogLine()
+            // Loading after the UI was up means a preset switch: the server restarts itself with the other
+            // weights and the web UI shows that progress, so keep the page (and its running job) on screen.
+            if case .ready = self.phase {} else {
+              self.phase = .loading
+              self.detail = self.lastLogLine()
+            }
           }
         } else if !sawServer {
           self.detail = self.lastLogLine()

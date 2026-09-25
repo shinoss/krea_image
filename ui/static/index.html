@@ -541,8 +541,7 @@ async function loadHistory() {
     if (job) return;
     if (edit) exitEdit();
     show(m);
-    if (PRESETS[m.preset] && (m.preset !== "fast" || fastAvail)) { preset = m.preset; store.set("preset", preset); }
-    renderSpeed();
+    // (the preset stays as the user set it: taking the image's would silently reload the engine on the next run)
     $("prompt").value = m.prompt; $("seed").value = m.seed;
   };
 }

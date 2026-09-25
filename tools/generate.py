@@ -39,7 +39,7 @@ def main():
     if a.steps and not fast:
         steps = a.steps
     t = time.time()
-    eng = Engine()
+    eng = Engine(preset=a.preset)  # loads only this preset's weights
     print(f"engine loaded in {time.time() - t:.1f}s")
 
     def progress(stage, step, total, ms, preview=None):

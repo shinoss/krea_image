@@ -166,8 +166,14 @@ class Engine {
     cond_ = std::make_unique<Conditioning>(m_, e + "cond.qw");
     load_latent_rgb();
     mem_report(m_, "vae + text fusion + cond");
-    // Default to the GPU+ANE hybrid when its weights exist; otherwise GPU-only.
-    load_dit(false, ane_available(false) && !getenv("KREA_GPU_ONLY"));
+    // One preset's DiT weights per process (KREA_PRESET=fast: the 4-step LoRA set): each set is ~16 GB of memory
+    // that can never be paged out, so the other preset is loaded by restarting the process (ui/server.py),
+    // never next to this one. Default to the GPU+ANE hybrid when its weights exist; otherwise GPU-only.
+    const char* pr = getenv("KREA_PRESET");
+    const bool fast0 = pr && std::string(pr) == "fast";
+    if (pr && !fast0 && std::string(pr) != "quality") throw std::runtime_error("KREA_PRESET must be quality or fast");
+    if (fast0 && !fast_available()) throw std::runtime_error("the Fast preset's weights are not installed");
+    load_dit(fast0, ane_available(fast0) && !getenv("KREA_GPU_ONLY"));
     mem_report(m_, "DiT + ANE programs loaded");
     kv_build_ = fnv_files({build_dir(root) + "/krea.metallib", self_path()}, true) ^
                 fnv_files({e + "te.qw", e + "txt.qw"}, false);
@@ -179,6 +185,7 @@ class Engine {
   }
 
   bool ane_available(bool fast = false) const { return !split_path(fast).empty(); }
+  bool loaded_fast() const { return fast_; }
   bool gpu_only_available() const { return !dit_path(false).empty(); }
   bool fast_available() const { return !dit_path(true).empty() || ane_available(true); }
 
@@ -197,12 +204,13 @@ class Engine {
     if (fast && !fast_available()) throw std::runtime_error("the 4-step LoRA weights are not installed");
     // GPU-only needs the full DiT; without it the hybrid is the only mode.
     const bool want_ane = ane_available(fast) && (p.ane || dit_path(fast).empty());
-    if (fast != fast_ || want_ane != (ane_ != nullptr)) {
-      if (report("loading", 0, 1)) return 1;
-      load_dit(fast, want_ane);
-      dit_->weights().prefetch();
-      dit_->weights().make_resident(m_);
-    }
+    // No in-process reload: loading another weight set here would briefly hold two (~32 GB, past the Mac's
+    // wired-memory limit). The caller restarts the engine with KREA_PRESET instead.
+    if (fast != fast_)
+      throw std::runtime_error(std::string("the ") + (fast ? "Fast" : "Quality") +
+                               " preset is not loaded; switching presets needs an engine restart (KREA_PRESET)");
+    if (want_ane != (ane_ != nullptr))
+      throw std::runtime_error("switching between GPU-only and GPU + Neural Engine needs an engine restart");
     const int H16 = p.height / 16, W16 = p.width / 16, M = H16 * W16;
     if (H16 < 2 || W16 < 2) throw std::runtime_error("image too small");
     const int steps = std::max(1, p.steps);
@@ -604,6 +612,7 @@ extern "C" void krea_destroy(krea_engine* e) { delete e; }
 extern "C" int krea_ane_available(krea_engine* e) { return e->e->ane_available() ? 1 : 0; }
 extern "C" int krea_fast_available(krea_engine* e) { return e->e->fast_available() ? 1 : 0; }
 extern "C" int krea_gpu_only_available(krea_engine* e) { return e->e->gpu_only_available() ? 1 : 0; }
+extern "C" int krea_loaded_fast(krea_engine* e) { return e->e->loaded_fast() ? 1 : 0; }
 
 extern "C" int krea_generate(krea_engine* e, const int* ids, int n_ids, const int* neg_ids, int n_neg,
                              const krea_params* p, uint8_t* out_rgba, krea_stats* stats, krea_progress_fn cb,

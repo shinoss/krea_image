@@ -52,12 +52,16 @@ typedef struct {
 } krea_stats;
 
 /* root: project directory containing weights/engine/ and engine/build/krea.metallib (env KREA_BUILD=<dir>
-   reads engine/<dir>/krea.metallib instead; KREA_CACHE_DIR moves the prompt cache from <root>/cache/prompts). */
+   reads engine/<dir>/krea.metallib instead; KREA_CACHE_DIR moves the prompt cache from <root>/cache/prompts;
+   KREA_PRESET=quality|fast selects the DiT weight set, default quality). */
 krea_engine* krea_create(const char* root, char* err, int errlen);
 void krea_destroy(krea_engine* e);
 int krea_ane_available(krea_engine* e);      /* GPU + Neural Engine weights installed */
 int krea_fast_available(krea_engine* e);     /* 4-step LoRA weights installed */
 int krea_gpu_only_available(krea_engine* e); /* full GPU-only DiT installed */
+/* 1 if this engine holds the Fast preset's weights (KREA_PRESET=fast at krea_create), 0 for Quality. Only one
+   preset is ever loaded: generating with the other one fails; restart the engine with KREA_PRESET instead. */
+int krea_loaded_fast(krea_engine* e);
 
 /* ids / neg_ids: token ids of [system prefix + prompt] + suffix (see ui/krea.py). out_rgba must hold
    width*height*4 bytes. Returns 0 on success, 1 if cancelled, -1 on error. */

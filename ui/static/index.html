@@ -46,6 +46,7 @@ textarea:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .seg button { padding: 7px 0; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
   font: inherit; font-size: 12.5px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .seg button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+.seg button:disabled { opacity: .45; cursor: not-allowed; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 .row { display: flex; gap: 8px; align-items: center; }
 .row > * { flex: 1; }
@@ -276,6 +277,7 @@ const store = {
 };
 let ratio = store.get("ratio", "1:1"), size = store.get("size", 1024), job = null, ready = false, aneInit = false;
 let pvKind = store.get("pvKind", "x0"), pvShown = "", lastJob = null, fastAvail = false;
+let loadedPreset = null, jobStage = "";  // the preset whose weights the engine holds; the tracked job's stage
 // Editing: {file?, dataUrl?, url, w, h, name, prompt} while an image is being edited, else null.
 let edit = null, brushOn = true, erasing = false, drawing = false, lastPt = null, maskDirty = false;
 let brush = store.get("brush", 64);
@@ -320,8 +322,11 @@ $("ratios").onclick = (e) => { if (e.target.dataset.r) { ratio = e.target.datase
 $("sizes").onclick = (e) => { if (e.target.dataset.s) { size = +e.target.dataset.s; store.set("size", size); renderSeg(); } };
 function renderSpeed() {
   $("speed").innerHTML = Object.entries(PRESETS).map(([k, v]) =>
-    `<button class="${k === preset ? "on" : ""}" data-p="${k}" ${k === "fast" && !fastAvail ? "disabled title=\"Install the 4-step LoRA weights first (see README)\"" : ""}>${v.label}</button>`).join("");
-  $("speedHint").textContent = PRESETS[preset].hint;
+    `<button class="${k === preset ? "on" : ""}" data-p="${k}" ${k === "fast" && !fastAvail ? "disabled title=\"The 4-step LoRA weights are not installed\"" : ""}>${v.label}</button>`).join("");
+  // The engine holds one preset's weights at a time (two would not fit in memory): the other one reloads.
+  $("speedHint").textContent = PRESETS[preset].hint + (loadedPreset && preset !== loadedPreset
+    ? ` Switching presets restarts the engine and loads its weights: about 30–60 s (the first time up to ~2 min while macOS prepares the Neural Engine programs).`
+    : "");
 }
 $("speed").onclick = (e) => {
   const k = e.target.dataset.p; if (!k || e.target.disabled) return;
@@ -403,21 +408,31 @@ async function pollStatus() {
     $("dot").className = "dot" + (ready ? " ok" : s.engine === "error" ? " err" : "");
     $("statusText").textContent = ready ? (s.generating ? "Engine busy" : "Engine ready") : s.engine === "error" ? "Engine error" : "Loading engine…";
     if (s.engine === "error") $("err").textContent = s.error;
-    const aneLocked = s.ane_available && s.gpu_only_available === false;  // no GPU-only weights installed
-    $("ane").disabled = !s.ane_available || aneLocked;
-    if (s.ane_available && !aneInit) { $("ane").checked = aneLocked || store.get("ane", true); aneInit = true; updateEta(); }
-    if (aneLocked) $("ane").checked = true;
-    if (!s.ane_available) $("ane").checked = false;
-    $("aneHint").textContent = !s.ane_available ? "GPU only (the Neural Engine programs are not built; see README)"
-      : aneLocked ? "GPU + Neural Engine split every DiT layer. GPU-only weights are not installed."
-      : "GPU + Neural Engine split every DiT layer. Off = GPU only (reloads weights).";
-    if (fastAvail !== !!s.fast_available) { fastAvail = !!s.fast_available; if (!fastAvail && preset === "fast") preset = "quality"; renderSpeed(); }
+    // What the weights allow is only known once the engine has loaded (a preset switch reloads it): keep the
+    // controls as they are meanwhile instead of resetting the user's choices.
+    if (ready) {
+      const aneLocked = s.ane_available && s.gpu_only_available === false;  // no GPU-only weights installed
+      $("ane").disabled = !s.ane_available || aneLocked;
+      if (s.ane_available && !aneInit) { $("ane").checked = aneLocked || store.get("ane", true); aneInit = true; updateEta(); }
+      if (aneLocked) $("ane").checked = true;
+      if (!s.ane_available) $("ane").checked = false;
+      $("aneHint").textContent = !s.ane_available ? "GPU only (the Neural Engine programs are not built; see README)"
+        : aneLocked ? "GPU + Neural Engine split every DiT layer. GPU-only weights are not installed."
+        : "GPU + Neural Engine split every DiT layer. Off = GPU only (reloads weights).";
+      if (fastAvail !== !!s.fast_available) { fastAvail = !!s.fast_available; if (!fastAvail && preset === "fast") preset = "quality"; renderSpeed(); }
+    }
+    if (s.preset && s.preset !== loadedPreset) { loadedPreset = s.preset; renderSpeed(); }
+    if (s.switching || (s.engine === "loading" && jobStage === "loading")) $("statusText").textContent = "Switching preset…";
     $("filterHint").textContent = s.content_filter ? `Content filter: ${s.content_filter}` : "";
     if (!job) $("go").disabled = false;
     const pa = ready && !!s.prepare_available;
     if (pa && !prepAvail) { prepAvail = true; prepSent = ""; schedulePrepare(); }  // (re)started engine
     prepAvail = pa;
-  } catch { $("statusText").textContent = "Server offline"; $("dot").className = "dot err"; prepAvail = false; }
+  } catch {  // (a preset switch restarts the server: a short gap is expected then)
+    $("statusText").textContent = jobStage === "loading" ? "Switching preset…" : "Server offline";
+    $("dot").className = "dot" + (jobStage === "loading" ? "" : " err");
+    prepAvail = false;
+  }
   setTimeout(pollStatus, ready ? 5000 : 1500);
 }
 
@@ -453,8 +468,10 @@ async function track(id, params) {
   try { j = await (await fetch(`/api/job/${id}`)).json(); } catch { setTimeout(() => track(id, params), 1000); return; }
   const labels = { encode: "Encoding prompt", denoise: "Denoising", decode: "Decoding image", done: "Finishing",
     queued: "Queued", loading: "Switching preset (loading weights)…" };
+  jobStage = j.stage || "";
   if (j.state === "queued") {
-    $("ovStage").textContent = j.queue_position ? `Queued (#${j.queue_position + 1})` : "Starting…";
+    $("ovStage").textContent = j.stage === "loading" ? labels.loading
+      : j.queue_position ? `Queued (#${j.queue_position + 1})` : "Starting…";
   } else if (j.state === "running") {
     const frac = j.stage === "denoise" ? j.step / Math.max(1, j.total) : j.stage === "decode" || j.stage === "done" ? 1 : 0;
     $("ovBar").style.width = (frac * 100).toFixed(1) + "%";
@@ -465,7 +482,7 @@ async function track(id, params) {
     if (j.stage === "denoise" && (j.preview_step || j.preview_hq_step)) { $("pvbar").classList.add("show"); setPreview(j); }
   }
   if (["done", "error", "cancelled"].includes(j.state)) {
-    job = null;
+    job = null; jobStage = "";
     $("go").disabled = !ready; $("cancel").style.display = "none"; $("overlay").classList.remove("show");
     $("pvbar").classList.remove("show");
     if (j.state === "done") { if (edit) exitEdit(); show(j.result, true); loadHistory(); }

@@ -10,7 +10,9 @@ instead of engine/build, so a development build can run next to the installed on
 """
 import ctypes
 import os
+import re
 import threading
+import time
 
 from tokenizers import Tokenizer
 
@@ -60,13 +62,66 @@ class Tokenizer2:
         return ids + self.suffix
 
 
+# Memory: one loaded preset wires ~16-18 GB (the DiT's GPU weights and Neural Engine programs can never be paged
+# out); macOS refuses (or, via drivers, can hang) once wired memory passes vm.user_wire_limit (~30.5 GB on a
+# 36 GB Mac). Loading next to another engine (the Qwen app, a second Krea process, or the previous preset still
+# being released) is what crashed the machine, so every load first checks the headroom.
+ENGINE_WIRED = 18e9
+
+
+def wired_bytes():
+    """System-wide wired memory (vm_stat 'Pages wired down')."""
+    import subprocess
+
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    m = re.search(r"page size of (\d+) bytes", out)
+    page = int(m.group(1)) if m else 16384
+    for line in out.splitlines():
+        if line.startswith("Pages wired down"):
+            return int(line.split(":")[1].strip().rstrip(".")) * page
+    return 0
+
+
+def wire_limit():
+    import subprocess
+
+    try:
+        return int(subprocess.run(["sysctl", "-n", "vm.user_wire_limit"], capture_output=True, text=True).stdout)
+    except ValueError:
+        return int(30.5e9)
+
+
+def wait_for_memory(timeout=0.0, log=print):
+    """Block until the engine fits under the wired-memory limit (up to `timeout` s), else raise."""
+    limit, t0, said = wire_limit(), time.time(), False
+    while True:
+        w = wired_bytes()
+        if w + ENGINE_WIRED <= limit - 1e9:
+            return w
+        if time.time() - t0 >= timeout:
+            raise RuntimeError(f"not enough memory to load the engine: {w / 1e9:.1f} GB is already wired by other "
+                               f"programs (macOS allows {limit / 1e9:.1f} GB, the engine needs ~{ENGINE_WIRED / 1e9:.0f} GB). "
+                               "Quit other image apps (for example QwenImage), then restart the engine.")
+        if not said:
+            log(f"[krea] waiting for memory: {w / 1e9:.1f} GB wired, limit {limit / 1e9:.1f} GB")
+            said = True
+        time.sleep(0.5)
+
+
 class Engine:
-    def __init__(self, root=ROOT):
+    def __init__(self, root=ROOT, preset=None, memory_timeout=5.0):
+        """preset: "quality" or "fast" (default: $KREA_PRESET or quality). Only that preset's weights are loaded;
+        generate() with the other preset fails, so switching means a new Engine (or a new process).
+        memory_timeout: how long to wait for enough free memory before refusing to load (see wait_for_memory)."""
+        if preset:
+            os.environ["KREA_PRESET"] = preset
+        if not os.environ.get("KREA_DIT_LAYERS"):  # (debug runs of a few layers need little memory)
+            wait_for_memory(memory_timeout)
         self.lib = ctypes.CDLL(os.path.join(build_dir(root), "libkrea.dylib"))
         L = self.lib
         L.krea_create.restype = ctypes.c_void_p
         L.krea_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-        for fn in ("krea_ane_available", "krea_fast_available", "krea_gpu_only_available"):
+        for fn in ("krea_ane_available", "krea_fast_available", "krea_gpu_only_available", "krea_loaded_fast"):
             getattr(L, fn).restype = ctypes.c_int
             getattr(L, fn).argtypes = [ctypes.c_void_p]
         L.krea_generate.restype = ctypes.c_int
@@ -86,6 +141,7 @@ class Engine:
         self.ane_available = bool(L.krea_ane_available(self.h))
         self.fast_available = bool(L.krea_fast_available(self.h))
         self.gpu_only_available = bool(L.krea_gpu_only_available(self.h))
+        self.preset = "fast" if L.krea_loaded_fast(self.h) else "quality"
         L.krea_destroy.argtypes = [ctypes.c_void_p]
 
     def close(self):

@@ -10,6 +10,11 @@ object {"file": <an image in the outputs folder> | "image": <data URL>, "mask": 
 "start_step": k} VAE-encodes the source, noises it to sigma[k] and denoises from there (a later start keeps more
 of it); with a mask only that area changes and the source pixels are kept elsewhere.
 
+Presets: one process holds one preset's DiT weights (~16-18 GB of memory that can't be paged out; two would
+pass macOS's wired-memory limit). A generation with the other preset restarts the server in place: the engine
+is freed, the server waits until macOS reports the memory released, then re-executes itself (same pid and port)
+with --preset and the pending jobs, which resume under the same ids (the UI keeps polling them).
+
 While the user types, the UI posts the prompt to /api/prepare: when no generation is running or
 queued, the worker encodes it ahead (text encoder + text fusion, cached in the engine), so Generate
 starts denoising right away. A newer prepare replaces a pending one. /api/status reports "busy" while
@@ -25,6 +30,7 @@ logs/server.log. logs/server.state.json records {pid, port} while the server run
 its own when that process disappears, so it can never be left orphaned.
 """
 import argparse
+import gc
 import io
 import json
 import os
@@ -72,6 +78,10 @@ class State:
         self.ane_available = False
         self.fast_available = False
         self.gpu_only_available = False
+        self.preset = "quality"  # the preset whose weights this process loads
+        self.switching = False   # a restart into the other preset is under way
+        self.argv = []           # command line for the restart (without --preset / --resume)
+        self.orig_fds = None     # stdout / stderr before setup_logging (restored before exec)
 
 
 S = State()
@@ -84,13 +94,10 @@ def load_engine():
     try:
         from krea import Engine
 
-        S.engine = Engine(ROOT)
+        # up to 60 s for memory: after a preset switch the previous engine's memory may still be draining
+        S.engine = Engine(ROOT, preset=S.preset, memory_timeout=60.0)
         S.ane_available = S.engine.ane_available
-        # Switching presets reloads a different ~16 GB weight set (GPU file + Neural Engine programs) in this
-        # process. A test that switched back and forth froze the machine on 2026-09-24, most likely because
-        # the old set was not yet freed when the new one was wired. Until the switch is fixed and verified,
-        # the Fast preset stays hidden unless KREA_ALLOW_PRESET_SWITCH=1.
-        S.fast_available = S.engine.fast_available and os.environ.get("KREA_ALLOW_PRESET_SWITCH") == "1"
+        S.fast_available = S.engine.fast_available
         S.gpu_only_available = S.engine.gpu_only_available
         S.engine_state = "ready"
     except Exception as e:  # surfaced in the UI
@@ -98,8 +105,8 @@ def load_engine():
         S.engine_error = str(e)
         traceback.print_exc()
     S.load_seconds = time.time() - t
-    print(f"[server] engine {S.engine_state} in {S.load_seconds:.1f}s; content filter: {content_filter.describe()}",
-          flush=True)
+    print(f"[server] engine {S.engine_state} ({S.preset} preset) in {S.load_seconds:.1f}s; content filter: "
+          f"{content_filter.describe()}", flush=True)
 
 
 def next_work():
@@ -190,6 +197,8 @@ def run_job(job):
     if S.engine_state != "ready":
         job.update(state="error", error=S.engine_error or "engine not available")
         return
+    if job["params"]["preset"] != S.preset:
+        switch_preset(job)  # does not return: the process restarts with the job's preset
     job["state"] = "running"
     job["started"] = time.time()
     p = job["params"]
@@ -243,6 +252,95 @@ def run_job(job):
     except Exception as e:
         traceback.print_exc()
         job.update(state="error", error=str(e))
+
+
+def switch_preset(job):
+    """Load the job's preset by restarting this process (never two weight sets in memory): free the engine, wait
+    until macOS has released its memory, save the pending jobs, exec this server again with --preset/--resume."""
+    from krea import wired_bytes
+
+    new = job["params"]["preset"]
+    job.update(state="running", stage="loading", step=0, total=1)
+    print(f"[server] switching preset {S.preset} -> {new}: restarting the engine", flush=True)
+    with S.cv:
+        S.switching = True
+        pending = [job]
+        while not S.q.empty():
+            j = S.q.get_nowait()
+            if j["state"] == "queued" and not j["cancel"]:
+                pending.append(j)
+        S.prep = None
+    w0, t0 = wired_bytes(), time.time()
+    eng, S.engine, S.engine_state = S.engine, None, "loading"
+    try:
+        eng.close()
+    except Exception:
+        traceback.print_exc()
+    del eng
+    gc.collect()
+    last = w0
+    while time.time() - t0 < 30:  # until it dropped by most of a weight set, or stopped dropping
+        time.sleep(0.5)
+        w = wired_bytes()
+        if w <= w0 - 8e9 or (time.time() - t0 > 3 and w >= last - 0.05e9):
+            break
+        last = w
+    print(f"[server] engine freed: wired {w0 / 1e9:.1f} -> {wired_bytes() / 1e9:.1f} GB after {time.time() - t0:.1f}s",
+          flush=True)
+    rdir = os.path.join(LOGS, "resume")
+    os.makedirs(rdir, exist_ok=True)
+    items = []
+    for j in pending:
+        it = {k: j[k] for k in ("id", "params", "created")}
+        src, mask = j.get("_edit", (None, None))
+        if src is not None:
+            it["src"] = os.path.join(rdir, j["id"] + "-src.png")
+            src.save(it["src"])
+            if mask is not None:
+                it["mask"] = os.path.join(rdir, j["id"] + "-mask.png")
+                mask.save(it["mask"])
+        items.append(it)
+    path = os.path.join(rdir, "jobs.json")
+    with open(path, "w") as f:
+        json.dump({"preset": new, "jobs": items}, f)
+    restart(["--preset", new, "--resume", path])
+
+
+def restart(extra):
+    """Re-execute this server in place (same pid, so a launcher such as the macOS app keeps supervising it)."""
+    print(f"[server] restarting: {' '.join(extra)}", flush=True)
+    time.sleep(0.3)  # let the log pump drain
+    if S.orig_fds:
+        os.dup2(S.orig_fds[0], 1)
+        os.dup2(S.orig_fds[1], 2)
+    os.execv(sys.executable, [sys.executable, "-u"] + S.argv + extra)
+
+
+def resume_jobs(path):
+    """Re-queue the jobs a preset switch carried over (same ids: the UI keeps polling them)."""
+    from PIL import Image
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    for it in data.get("jobs", []):
+        p = it["params"]
+        job = {"id": it["id"], "state": "queued", "params": p, "created": it["created"], "cancel": False,
+               "stage": "loading", "step": 0, "total": p["steps"] - p.get("edit", {}).get("start_step", 0),
+               "elapsed_ms": 0}
+        if it.get("src"):
+            src = Image.open(it["src"]).convert("RGB")
+            mask = Image.open(it["mask"]).convert("L") if it.get("mask") else None
+            job["_edit"] = (src, mask)
+        with S.lock:
+            S.jobs[job["id"]] = job
+            S.order.append(job["id"])
+        S.q.put(job)
+    for fn in os.listdir(os.path.dirname(path)):
+        os.remove(os.path.join(os.path.dirname(path), fn))
+    print(f"[server] resumed {len(data.get('jobs', []))} job(s) after the preset switch", flush=True)
 
 
 def history(limit=48):
@@ -350,6 +448,7 @@ class Handler(SimpleHTTPRequestHandler):
                                    "busy": bool(running) or S.prep_cur is not None, "generating": bool(running),
                                    "queued": S.q.qsize(), "ane_available": S.ane_available,
                                    "fast_available": S.fast_available, "gpu_only_available": S.gpu_only_available,
+                                   "preset": S.preset, "switching": S.switching,
                                    "prepare_available": prepare_available(), "preparing": S.prep_cur is not None,
                                    "preview_available": os.path.exists(os.path.join(ROOT, "weights", "engine", "latent_rgb.json")),
                                    "content_filter": content_filter.describe()})
@@ -405,6 +504,8 @@ class Handler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             return self.send_json({"error": "bad json"}, 400)
         if path == "/api/generate":
+            if S.switching:
+                return self.send_json({"error": "the engine is switching presets; try again in a moment"}, 503)
             prompt = str(body.get("prompt", "")).strip()
             if not prompt:
                 return self.send_json({"error": "prompt is empty"}, 400)
@@ -521,6 +622,7 @@ def setup_logging(path, quiet):
         os.replace(path, path + ".1")
     logf = open(path, "ab", buffering=0)
     echo = None if quiet else os.dup(1)
+    S.orig_fds = (os.dup(1), os.dup(2))  # restored before a restart (the pipe's reader does not survive exec)
     r, w = os.pipe()
     os.dup2(w, 1)
     os.dup2(w, 2)
@@ -581,7 +683,20 @@ def main():
     ap.add_argument("--parent-pid", type=int, default=0, help="exit when this process exits")
     ap.add_argument("--outputs", default=OUT, help="where generated images are saved (and listed from)")
     ap.add_argument("--no-engine", action="store_true", help="UI/gallery only, don't load the model (development)")
+    ap.add_argument("--preset", choices=list(PRESETS), default=os.environ.get("KREA_PRESET") or "quality",
+                    help="weights to load (a generation with the other preset restarts the server with it)")
+    ap.add_argument("--resume", default="", help=argparse.SUPPRESS)  # jobs carried over by a preset switch
     a = ap.parse_args()
+    S.preset = a.preset
+    argv, skip = [], False
+    for x in sys.argv:  # the command line minus --preset / --resume, for restarts
+        if skip:
+            skip = False
+        elif x in ("--preset", "--resume"):
+            skip = True
+        elif not x.startswith(("--preset=", "--resume=")):
+            argv.append(x)
+    S.argv = argv
     OUT = os.path.abspath(a.outputs)
     if a.log:
         setup_logging(a.log, a.quiet)
@@ -603,9 +718,11 @@ def main():
         S.engine_state, S.engine_error = "error", "engine disabled (--no-engine)"
     else:
         threading.Thread(target=load_engine, daemon=True).start()
+    if a.resume:
+        resume_jobs(a.resume)
     threading.Thread(target=worker, daemon=True).start()
-    print(f"[server] http://{a.host}:{srv.server_address[1]}  pid {os.getpid()}  outputs {OUT}  (engine loading)",
-          flush=True)
+    print(f"[server] http://{a.host}:{srv.server_address[1]}  pid {os.getpid()}  outputs {OUT}  ({a.preset} preset, "
+          "engine loading)", flush=True)
     srv.serve_forever()
 
 

@@ -2,8 +2,10 @@
 
   te.qw        Qwen3-VL-4B text model, layers 0-34 + embedding (bf16; norms f32)
   txt.qw       TextFusion (bf16 linears) + txtmlp (f32)
-  dit.qw       28 DiT blocks (bf16) + first / last (f32); dit_q8.qw: blocks in int8 (group 128)
-  dit_fast.qw  the same with the 4-step LoRA merged (W + B A in fp32, rounded once)
+  dit_h3072_kv.qw       the GPU's share of the GPU + Neural Engine split (k|v, MLP units [0, 3072), O-projection);
+                        tools/build_ane.py builds the Neural Engine's share (weights/ane)
+  dit_h3072_kv_fast.qw  the same with the 4-step LoRA merged (W + B A in fp32, rounded once); weights/ane_fast
+  dit.qw, dit_q8.qw     optional GPU-only DiT (bf16 / int8 group-128), dit_fast*.qw with the LoRA
   cond.qw      f32 tmlp / tproj (for custom schedules, CPU only) + t(sigma), tvec(sigma) of the preset
                schedules (8 steps; 4 steps with the LoRA)
   vae.qw       Qwen-Image VAE decoder + encoder (bf16 convs, f32 norms / biases)
@@ -14,15 +16,13 @@ aligned (the page size), grouped by name prefix (the engine wraps each prefix gr
 (/gate) projections are fused, and SwiGLU gate/up rows are interleaved per 64-column GEMM tile.
 Norm weights of the (1 + w) form are stored as 1 + w in f32.
 
-  python tools/convert.py te txt dit cond vae      # dit_q8, dit_fast, dit_fast_q8 on request
-  python tools/convert.py verify                  # round-trip check of every tensor against the sources
+  python tools/convert.py te txt cond vae tokenizer dit_split dit_split_fast   # what the app needs (see run.sh)
 """
 import argparse
 import json
 import math
 import os
 import struct
-import sys
 import time
 
 import numpy as np
@@ -396,73 +396,10 @@ def copy_tokenizer():
     print("copied tokenizer.json")
 
 
-# ---------------------------------------------------------------------------------------------
-def verify():
-    """Every converted tensor, inverted, against the source bytes (exact for bf16 / f32 layouts)."""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from qw import QwFile
-
-    bad = 0
-
-    def eq(name, a, b):
-        nonlocal bad
-        ok = a.shape == b.shape and torch.equal(a, b)
-        if not ok:
-            bad += 1
-            print(f"  MISMATCH {name}: {tuple(a.shape)} vs {tuple(b.shape)}")
-        return ok
-
-    if os.path.exists(os.path.join(DST, "dit.qw")):
-        q, s = QwFile(os.path.join(DST, "dit.qw")), DitSource()
-        for i in range(LAYERS):
-            p, b = f"L{i}.", f"blocks.{i}."
-            qkvg = q.get(p + "qkvg").t()
-            for n, part in zip(("wq", "wk", "wv", "gate"), qkvg.split([D, 1536, 1536, D])):
-                eq(p + n, part, s.raw(b + f"attn.{n}.weight"))
-            eq(p + "o", q.get(p + "o").t(), s.raw(b + "attn.wo.weight"))
-            g, u = deinterleave_gate_up(q.get(p + "gu").t())
-            eq(p + "gate", g, s.raw(b + "mlp.gate.weight"))
-            eq(p + "up", u, s.raw(b + "mlp.up.weight"))
-            eq(p + "down", q.get(p + "down").t(), s.raw(b + "mlp.down.weight"))
-            eq(p + "mod", q.get(p + "mod").reshape(-1), s.raw(b + "mod.lin"))
-            eq(p + "n1", q.get(p + "n1") - 1, s.raw(b + "prenorm.scale"))
-        eq("first.w", q.get("first.w").t(), s.raw("first.weight"))
-        eq("last.w", q.get("last.w").t(), s.raw("last.linear.weight"))
-        print(f"dit.qw checked ({bad} mismatches so far)")
-    if os.path.exists(os.path.join(DST, "txt.qw")):
-        q, s = QwFile(os.path.join(DST, "txt.qw")), DitSource()
-        for b in range(4):
-            p, src = f"F{b}.", f"txtfusion.{'layerwise_blocks' if b < 2 else 'refiner_blocks'}.{b % 2}."
-            for n, part in zip(("wq", "wk", "wv", "gate"), q.get(p + "qkvg").t().split(TD)):
-                eq(p + n, part, s.raw(src + f"attn.{n}.weight"))
-            g, u = deinterleave_gate_up(q.get(p + "gu").t())
-            eq(p + "gate", g, s.raw(src + "mlp.gate.weight"))
-            eq(p + "up", u, s.raw(src + "mlp.up.weight"))
-            eq(p + "down", q.get(p + "down").t(), s.raw(src + "mlp.down.weight"))
-        eq("M.w2", q.get("M.w2").t(), s.raw("txtmlp.3.weight"))
-        print(f"txt.qw checked ({bad} mismatches so far)")
-    if os.path.exists(os.path.join(DST, "te.qw")):
-        q, f = QwFile(os.path.join(DST, "te.qw")), safe_open(TE_FILE, "pt")
-        pre = "model.language_model."
-        eq("embed", q.get("embed"), f.get_tensor(pre + "embed_tokens.weight"))
-        for i in range(TE_LAYERS):
-            p, s_ = f"L{i}.", f"{pre}layers.{i}."
-            for n, part in zip("qkv", q.get(p + "qkv").t().split([4096, 1024, 1024])):
-                eq(p + n, part, f.get_tensor(s_ + f"self_attn.{n}_proj.weight"))
-            g, u = deinterleave_gate_up(q.get(p + "gu").t())
-            eq(p + "gate", g, f.get_tensor(s_ + "mlp.gate_proj.weight"))
-            eq(p + "up", u, f.get_tensor(s_ + "mlp.up_proj.weight"))
-            eq(p + "down", q.get(p + "down").t(), f.get_tensor(s_ + "mlp.down_proj.weight"))
-            eq(p + "ln1", q.get(p + "ln1").to(torch.bfloat16), f.get_tensor(s_ + "input_layernorm.weight"))
-        print(f"te.qw checked ({bad} mismatches so far)")
-    print("verify:", "all tensors match" if not bad else f"{bad} MISMATCHES")
-    return bad
-
-
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("parts", nargs="+", help="te te_q8 txt dit dit_q8 dit_fast dit_fast_q8 dit_split dit_split_fast "
-                                             "cond vae tokenizer verify")
+                                             "cond vae tokenizer")
     ap.add_argument("--gpu-units", type=int, default=3072, help="dit_split: MLP units kept on the GPU")
     a = ap.parse_args()
     os.makedirs(DST, exist_ok=True)
@@ -472,11 +409,9 @@ if __name__ == "__main__":
             "dit_split": lambda: convert_dit(False, False, a.gpu_units, True),
             "dit_split_fast": lambda: convert_dit(False, True, a.gpu_units, True),
             "cond": convert_cond, "vae": convert_vae,
-            "tokenizer": copy_tokenizer, "verify": verify}
+            "tokenizer": copy_tokenizer}
     for part in a.parts:
         t = time.time()
         print(f"[{part}]", flush=True)
-        r = jobs[part]()
+        jobs[part]()
         print(f"[{part}] {time.time() - t:.1f} s", flush=True)
-        if part == "verify" and r:
-            sys.exit(1)

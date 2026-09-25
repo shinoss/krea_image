@@ -9,7 +9,7 @@
 
 namespace krea {
 
-// Model shapes (see docs/PLAN.md). Everything below is specialized for them.
+// Model shapes of Krea 2 Turbo. Everything below is specialized for them.
 constexpr int kD = 6144;            // DiT width
 constexpr int kHeads = 48, kKvHeads = 12, kHd = 128;
 constexpr int kQKVG = kD + 2 * kKvHeads * kHd + kD;  // fused q | k | v | gate = 15360

@@ -1,7 +1,6 @@
 # Model weights, converted weights, Neural Engine programs, caches
 /weights/
 /cache/
-/ref*/
 *.safetensors
 *.kw
 *.qw
@@ -23,11 +22,12 @@ __pycache__/
 /KreaImage.app/
 /app/build/
 /app/AppIcon.iconset/
+/app/AppIcon.png
 *.air
 *.metallib
 *.dylib
 
-# Development tools, benchmarks and experiments (kept locally, not part of the app)
+# Development tools, benchmarks, experiments, reference dumps, notes and logs (kept locally, not part of the app)
 /dev/
 
 # macOS

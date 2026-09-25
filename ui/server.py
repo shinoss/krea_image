@@ -18,7 +18,7 @@ with --preset and the pending jobs, which resume under the same ids (the UI keep
 While the user types, the UI posts the prompt to /api/prepare: when no generation is running or
 queued, the worker encodes it ahead (text encoder + text fusion, cached in the engine), so Generate
 starts denoising right away. A newer prepare replaces a pending one. /api/status reports "busy" while
-either runs (dev/bench/gpu_lock.py waits on it), "generating" for a generation only.
+either runs (so other GPU work can wait for it), "generating" for a generation only.
 
 Every request passes the content-filter hook (ui/content_filter.py; required by the Krea 2 Turbo model card):
 the prompt before any work, the image before it is saved or shown (edit sources included: a blocked prompt never

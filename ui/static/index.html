@@ -22,15 +22,25 @@ html, body { margin: 0; background: var(--bg); color: var(--ink);
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
 header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
 header h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
-header .sub { color: var(--muted); font-size: 12.5px; }
 .pill { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px;
   border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
 .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
-main { display: grid; grid-template-columns: 360px 1fr; gap: 20px; padding: 20px; max-width: 1400px; margin: 0 auto; }
-@media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } }
+/* The controls panel and the image box share the first grid row, so they always have the same height; the stats
+   and the Recent gallery sit below the image. The image box may grow to the panel's natural height (--left-h, set
+   from script) but otherwise stays within the window. */
+main { display: grid; grid-template-columns: 360px 1fr; column-gap: 20px; row-gap: 12px; padding: 20px; max-width: 1400px;
+  margin: 0 auto; align-items: start; }
+.stage { display: contents; }
+.controls { grid-column: 1; grid-row: 1; align-self: stretch; }
+.canvas, #stats, #histPanel { grid-column: 2; min-width: 0; }
+.canvas { grid-row: 1; align-self: stretch; }
+@media (max-width: 860px) {
+  main { grid-template-columns: 1fr; padding: 16px; }
+  .controls, .canvas, #stats, #histPanel { grid-column: 1; grid-row: auto; }
+}
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
-.controls { display: flex; flex-direction: column; gap: 16px; align-self: start; }
+.controls-in { display: flex; flex-direction: column; gap: 16px; }
 label.h { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 600;
   color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
 label.h span.v { text-transform: none; letter-spacing: 0; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -52,16 +62,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .row > * { flex: 1; }
 .iconbtn { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
   color: var(--ink); cursor: pointer; font-size: 16px; }
-.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13.5px; }
-.toggle small { display: block; color: var(--muted); font-size: 12px; }
-.switch { position: relative; width: 38px; height: 22px; flex: 0 0 auto; }
-.switch input { opacity: 0; width: 0; height: 0; }
-.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 999px; transition: .15s; cursor: pointer; }
-.switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%;
-  background: #fff; transition: .15s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
-.switch input:checked + span { background: var(--accent); }
-.switch input:checked + span::after { transform: translateX(16px); }
-.switch input:disabled + span { opacity: .4; cursor: not-allowed; }
 .go { display: flex; gap: 8px; }
 .primary { flex: 1; padding: 12px; border: 0; border-radius: 11px; background: var(--accent); color: var(--accent-ink);
   font: inherit; font-weight: 650; font-size: 15px; cursor: pointer; }
@@ -73,13 +73,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .prep.show { opacity: 1; visibility: visible; }
 details summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 details[open] summary { margin-bottom: 8px; }
-.stage { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .canvas { position: relative; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: var(--shadow);
   background-color: var(--check-b); background-image: linear-gradient(45deg, var(--check-a) 25%, transparent 25%),
   linear-gradient(-45deg, var(--check-a) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--check-a) 75%),
   linear-gradient(-45deg, transparent 75%, var(--check-a) 75%); background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0; display: grid; place-items: center; min-height: 420px; aspect-ratio: 1 / 1;
-  max-height: calc(100vh - 220px); margin: 0 auto; width: 100%; }
+  max-height: max(calc(100vh - 220px), var(--left-h, 0px)); margin: 0 auto; width: 100%; }
 .canvas img.layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block;
   opacity: 0; transition: opacity .7s ease; pointer-events: none; }
 .canvas img.layer.show { opacity: 1; }
@@ -152,15 +151,13 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 </head>
 <body>
 <header>
-  <div>
-    <h1>Krea 2 Turbo Studio</h1>
-    <div class="sub">Custom Metal + Neural Engine engine · shape-specialized kernels on Apple silicon</div>
-  </div>
+  <h1>Krea 2 Turbo Studio</h1>
   <div class="pill" id="status"><span class="dot" id="dot"></span><span id="statusText">Loading engine…</span></div>
 </header>
 
 <main>
   <section class="panel controls">
+   <div class="controls-in" id="controlsIn">
     <div class="editcard" id="editCard">
       <div class="edit-head">
         <img id="editThumb" alt="">
@@ -218,30 +215,12 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
       </div>
     </div>
 
-    <label class="toggle" id="aneRow">
-      <span>Neural Engine assist<small id="aneHint">Offload part of every DiT layer to the ANE</small></span>
-      <span class="switch"><input type="checkbox" id="ane"><span></span></span>
-    </label>
-
-    <div>
-      <label class="h" for="pvSel">Live preview</label>
-      <select id="pvSel">
-        <option value="fast">Every step (fast latent preview)</option>
-        <option value="hq4">Every step + VAE decode every 4 steps</option>
-        <option value="hq2">Every step + VAE decode every 2 steps</option>
-        <option value="off">Off</option>
-      </select>
-      <div class="hint">The fast preview is a CPU projection of the latent (1/8 resolution) and costs no GPU time; VAE decodes add one decode per N steps.</div>
-    </div>
-
     <div class="go">
       <button class="primary" id="go" disabled>Generate</button>
       <button class="secondary" id="cancel" style="display:none">Cancel</button>
     </div>
-    <button class="secondary" id="openBtn" title="Open an image from this Mac and edit it">Edit an image…</button>
-    <input type="file" id="fileIn" accept="image/png,image/jpeg,image/webp" style="display:none">
     <div class="err" id="err"></div>
-    <div class="hint" id="filterHint"></div>
+   </div>
   </section>
 
   <section class="stage">
@@ -275,7 +254,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem("krea." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("krea." + k, JSON.stringify(v)); } catch {} },
 };
-let ratio = store.get("ratio", "1:1"), size = store.get("size", 1024), job = null, ready = false, aneInit = false;
+let ratio = store.get("ratio", "1:1"), size = store.get("size", 1024), job = null, ready = false;
 let pvKind = store.get("pvKind", "x0"), pvShown = "", lastJob = null, fastAvail = false;
 let loadedPreset = null, jobStage = "";  // the preset whose weights the engine holds; the tracked job's stage
 // Editing: {file?, dataUrl?, url, w, h, name, prompt} while an image is being edited, else null.
@@ -314,7 +293,7 @@ function renderSeg() {
 }
 function updateEta() {
   const [w, h] = edit ? [edit.w, edit.h] : dims(), steps = edit ? PRESETS[preset].steps - startStep() : PRESETS[preset].steps;
-  const per = store.get(`spp.${w}x${h}.${$("ane").checked ? 1 : 0}.${preset}`, null);
+  const per = store.get(`spp.${w}x${h}.1.${preset}`, null);
   $("eta").textContent = per ? `Estimated ≈ ${fmt(per * steps + 3000)} on this Mac (${(per / 1000).toFixed(2)} s/step measured).`
     : "Krea 2 Turbo is trained for 1024–2048 px; 768 is a quick draft size.";
 }
@@ -335,10 +314,7 @@ $("speed").onclick = (e) => {
   if (edit) renderAmount();
 };
 $("dice").onclick = () => { $("seed").value = Math.floor(Math.random() * 2147483647); };
-$("ane").onchange = () => { store.set("ane", $("ane").checked); updateEta(); };
 $("prompt").value = store.get("prompt", "");
-$("pvSel").value = store.get("pvSel", "fast");
-$("pvSel").onchange = () => store.set("pvSel", $("pvSel").value);
 function renderPvMode() {
   for (const b of $("pvMode").children) b.classList.toggle("on", b.dataset.k === pvKind);
 }
@@ -410,20 +386,13 @@ async function pollStatus() {
     if (s.engine === "error") $("err").textContent = s.error;
     // What the weights allow is only known once the engine has loaded (a preset switch reloads it): keep the
     // controls as they are meanwhile instead of resetting the user's choices.
-    if (ready) {
-      const aneLocked = s.ane_available && s.gpu_only_available === false;  // no GPU-only weights installed
-      $("ane").disabled = !s.ane_available || aneLocked;
-      if (s.ane_available && !aneInit) { $("ane").checked = aneLocked || store.get("ane", true); aneInit = true; updateEta(); }
-      if (aneLocked) $("ane").checked = true;
-      if (!s.ane_available) $("ane").checked = false;
-      $("aneHint").textContent = !s.ane_available ? "GPU only (the Neural Engine programs are not built; see README)"
-        : aneLocked ? "GPU + Neural Engine split every DiT layer. GPU-only weights are not installed."
-        : "GPU + Neural Engine split every DiT layer. Off = GPU only (reloads weights).";
-      if (fastAvail !== !!s.fast_available) { fastAvail = !!s.fast_available; if (!fastAvail && preset === "fast") preset = "quality"; renderSpeed(); }
+    if (ready && fastAvail !== !!s.fast_available) {
+      fastAvail = !!s.fast_available;
+      if (!fastAvail && preset === "fast") preset = "quality";
+      renderSpeed();
     }
     if (s.preset && s.preset !== loadedPreset) { loadedPreset = s.preset; renderSpeed(); }
     if (s.switching || (s.engine === "loading" && jobStage === "loading")) $("statusText").textContent = "Switching preset…";
-    $("filterHint").textContent = s.content_filter ? `Content filter: ${s.content_filter}` : "";
     if (!job) $("go").disabled = false;
     const pa = ready && !!s.prepare_available;
     if (pa && !prepAvail) { prepAvail = true; prepSent = ""; schedulePrepare(); }  // (re)started engine
@@ -444,7 +413,7 @@ async function generate() {
   clearTimeout(prepTimer); prepSent = prompt; $("prepHint").classList.remove("show");  // encoded by the run
   let [w, h] = edit ? [edit.w, edit.h] : dims();
   const body = { prompt, width: w, height: h, preset, seed: $("seed").value === "" ? null : +$("seed").value,
-    ane: $("ane").checked, preview: $("pvSel").value !== "off", hq_preview_every: { hq4: 4, hq2: 2 }[$("pvSel").value] || 0 };
+    ane: true, preview: true, hq_preview_every: 4 };  // live preview every step + a real VAE decode every 4 steps
   if (edit) {
     body.edit = { start_step: startStep(), mask: maskDirty ? $("maskCv").toDataURL("image/png") : null };
     if (edit.file) body.edit.file = edit.file; else body.edit.image = edit.dataUrl;
@@ -554,8 +523,9 @@ function show(m, fromPreview = false) {
   updateEta();
 }
 
+let histItems = [];
 async function loadHistory() {
-  const items = await (await fetch("/api/history")).json();
+  const items = histItems = await (await fetch("/api/history")).json();
   $("histPanel").style.display = items.length ? "" : "none";
   const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   $("gallery").innerHTML = items.map((m, i) => `<div class="gitem${m.file === shownFile ? " current" : ""}" data-i="${i}" data-file="${esc(m.file)}">
@@ -636,7 +606,10 @@ function enterEdit(src) {
   layoutMask();
 }
 function exitEdit() {
+  const src = edit && histItems.find((m) => m.file === edit.file);
   edit = null;
+  if (src) show(src);  // back to the image's own details (the "Editing" chip goes)
+  else $("stats").innerHTML = "";
   $("editCard").classList.remove("show");
   $("ratioBlock").style.display = $("sizeBlock").style.display = "";
   $("maskCv").classList.remove("on");
@@ -692,26 +665,9 @@ function updateMaskState() {
   renderAmount();
 }
 
-// Open an image from this Mac: same size rule as the server (fit 2048 px, multiples of 16).
-$("openBtn").onclick = () => { if (!job) $("fileIn").click(); };
-$("fileIn").onchange = () => {
-  const f = $("fileIn").files[0];
-  $("fileIn").value = "";
-  if (!f) return;
-  const rd = new FileReader();
-  rd.onload = () => {
-    const im = new Image();
-    im.onload = () => {
-      const sc = Math.min(1, 2048 / Math.max(im.naturalWidth, im.naturalHeight));
-      const w = Math.floor(im.naturalWidth * sc / 16) * 16, h = Math.floor(im.naturalHeight * sc / 16) * 16;
-      if (Math.min(w, h) < 256) { $("err").textContent = "That image is too small to edit (at least 256 px per side)."; return; }
-      enterEdit({ url: rd.result, dataUrl: rd.result, w, h, name: f.name, prompt: "" });
-    };
-    im.onerror = () => { $("err").textContent = "Couldn't read that image (PNG, JPEG or WebP)."; };
-    im.src = rd.result;
-  };
-  rd.readAsDataURL(f);
-};
+// Equal heights: the image box may grow to the controls panel's natural height (padding + border included).
+new ResizeObserver(() => document.documentElement.style.setProperty("--left-h", `${$("controlsIn").offsetHeight + 34}px`))
+  .observe($("controlsIn"));
 
 renderSpeed(); renderSeg(); pollStatus(); loadHistory();
 </script>
